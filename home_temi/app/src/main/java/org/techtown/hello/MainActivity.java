@@ -1,0 +1,749 @@
+package org.techtown.hello;
+
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Bundle;
+import android.view.Gravity;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+
+public class MainActivity extends AppCompatActivity {
+    private static final String PAGE_HOME = "HOME";
+    private static final String PAGE_FIND = "FIND";
+    private static final String PAGE_RESULT = "RESULT";
+    private static final String PAGE_REGISTER = "REGISTER";
+    private static final String PAGE_DB_STATUS = "DB_STATUS";
+    private static final String[] API_BASE_URLS = {
+            "http://127.0.0.1:8000",
+            "http://10.0.2.2:8000",
+            "http://172.17.76.159:8000",
+            "http://172.17.79.72:8000"
+    };
+
+    private FrameLayout pageRoot;
+    private String currentPage = PAGE_HOME;
+    private EditText searchInput;
+    private EditText registerNameInput;
+    private EditText registerDrawerInput;
+    private EditText registerQuantityInput;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        super.onCreate(savedInstanceState);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        applyTemiImmersiveMode();
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
+        }
+
+        pageRoot = new FrameLayout(this);
+        pageRoot.setBackgroundColor(Color.parseColor("#F5F7FA"));
+        setContentView(pageRoot);
+
+        String launchKeyword = getIntent().getStringExtra("search_keyword");
+        if (launchKeyword != null && !launchKeyword.trim().isEmpty()) {
+            searchItem(launchKeyword.trim());
+        } else {
+            showHome();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applyTemiImmersiveMode();
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (PAGE_HOME.equals(currentPage)) {
+            super.onBackPressed();
+        } else if (PAGE_RESULT.equals(currentPage)) {
+            showFindPage();
+        } else {
+            showHome();
+        }
+    }
+
+    private void showHome() {
+        currentPage = PAGE_HOME;
+
+        LinearLayout page = basePage(K.HOME_TITLE, false);
+        LinearLayout menuRow = horizontal(page);
+        addMenuCard(menuRow, K.FIND_CARD_TITLE, v -> showFindPage());
+        addMenuCard(menuRow, K.REGISTER_CARD_TITLE, v -> showRegisterPage());
+        addMenuCard(menuRow, K.DB_STATUS_CARD_TITLE, v -> checkDbStatus());
+        setPage(page);
+    }
+
+    private void showFindPage() {
+        currentPage = PAGE_FIND;
+
+        LinearLayout page = basePage(K.FIND_TITLE, true);
+
+        searchInput = input(K.ITEM_NAME_INPUT);
+        page.addView(searchInput, matchHeight(72, 6, 18));
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.VOICE_BUTTON, false, v -> toast(K.VOICE_TODO));
+        addButton(row, K.SEARCH_BUTTON, true, v -> {
+            String keyword = searchInput.getText().toString().trim();
+            if (keyword.isEmpty()) {
+                toast(K.EMPTY_KEYWORD);
+                return;
+            }
+            searchItem(keyword);
+        });
+
+        setPage(page);
+    }
+
+    private void showRegisterPage() {
+        currentPage = PAGE_REGISTER;
+
+        LinearLayout page = basePage(K.REGISTER_TITLE, true);
+        LinearLayout form = card(page);
+
+        registerNameInput = input(K.REGISTER_NAME_HINT);
+        registerDrawerInput = input(K.REGISTER_DRAWER_HINT);
+        registerQuantityInput = input(K.REGISTER_QUANTITY_HINT);
+
+        form.addView(registerNameInput, matchHeight(76, 0, 12));
+
+        LinearLayout secondRow = compactRow(form);
+        addCompactInput(secondRow, registerDrawerInput);
+        addCompactInput(secondRow, registerQuantityInput);
+
+        addButton(page, K.REGISTER_BUTTON, true, v -> registerItem());
+        setPage(page);
+    }
+
+    private void registerItem() {
+        String name = registerNameInput.getText().toString().trim();
+        String drawerText = registerDrawerInput.getText().toString().trim();
+        String quantityText = registerQuantityInput.getText().toString().trim();
+
+        if (name.isEmpty() || drawerText.isEmpty() || quantityText.isEmpty()) {
+            toast(K.REGISTER_EMPTY);
+            return;
+        }
+
+        int drawerNumber;
+        int quantity;
+        try {
+            drawerNumber = Integer.parseInt(drawerText);
+            quantity = Integer.parseInt(quantityText);
+        } catch (NumberFormatException e) {
+            toast(K.REGISTER_NUMBER_ERROR);
+            return;
+        }
+        showSimpleLoading(K.REGISTERING_TITLE, K.REGISTERING_MESSAGE);
+        new Thread(() -> {
+            try {
+                postPlacement(name, drawerNumber, quantity);
+                runOnUiThread(() -> showRegisterSuccess(name, drawerNumber, quantity));
+            } catch (Exception e) {
+                runOnUiThread(() -> showSimpleError(K.REGISTER_FAIL_TITLE, e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void showRegisterSuccess(String name, int drawerNumber, int quantity) {
+        currentPage = PAGE_RESULT;
+
+        LinearLayout page = basePage(K.REGISTER_DONE_TITLE, true);
+        LinearLayout resultCard = card(page);
+        TextView headline = text(K.REGISTER_DONE_MESSAGE, 34, "#17202A", true);
+        resultCard.addView(headline);
+        addInfoRow(resultCard, K.DRAWER_LABEL, drawerNumber + K.DRAWER_SUFFIX);
+        addInfoRow(resultCard, K.QUANTITY_LABEL, quantity + K.QUANTITY_SUFFIX);
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.SEARCH_NOW_BUTTON, false, v -> searchItem(name));
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+    }
+
+    private void checkDbStatus() {
+        currentPage = PAGE_DB_STATUS;
+        showSimpleLoading(K.DB_STATUS_TITLE, K.DB_CHECKING_MESSAGE);
+        new Thread(() -> {
+            try {
+                String baseUrl = fetchHealth();
+                runOnUiThread(() -> showDbStatus(true, baseUrl, null));
+            } catch (Exception e) {
+                runOnUiThread(() -> showDbStatus(false, "", e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void searchItem(String keyword) {
+        showLoading(keyword);
+        new Thread(() -> {
+            try {
+                ItemInfo item = fetchItem(keyword);
+                runOnUiThread(() -> showResult(keyword, item, null));
+            } catch (Exception e) {
+                runOnUiThread(() -> showResult(keyword, null, e.getMessage()));
+            }
+        }).start();
+    }
+
+    private ItemInfo fetchItem(String keyword) throws Exception {
+        String encoded = URLEncoder.encode(keyword, "UTF-8");
+        Exception lastError = null;
+        for (String baseUrl : API_BASE_URLS) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(baseUrl + "/api/items/search?name=" + encoded);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+
+                int code = connection.getResponseCode();
+                InputStream stream = code >= 200 && code < 300
+                        ? connection.getInputStream()
+                        : connection.getErrorStream();
+                String body = readBody(stream);
+
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException(K.API_ERROR + code);
+                }
+
+                return parseItem(keyword, body);
+            } catch (Exception e) {
+                lastError = e;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+
+        if (lastError != null) {
+            throw lastError;
+        }
+        return null;
+    }
+
+    private ItemInfo parseItem(String keyword, String body) throws Exception {
+        JSONObject json = new JSONObject(body);
+        if (!json.optBoolean("found", false)) {
+            return null;
+        }
+
+        return new ItemInfo(
+                json.optString("name", keyword),
+                json.optString("location", ""),
+                json.optInt("drawer_number", 0),
+                json.optInt("quantity", 0)
+        );
+    }
+
+    private void postPlacement(String name, int drawerNumber, int quantity) throws Exception {
+        JSONObject json = new JSONObject();
+        json.put("item_name", name);
+        json.put("drawer_number", drawerNumber);
+        json.put("quantity", quantity);
+        postJson("/api/placements", json.toString());
+    }
+
+    private void postJson(String path, String body) throws Exception {
+        Exception lastError = null;
+        byte[] payload = body.getBytes("UTF-8");
+
+        for (String baseUrl : API_BASE_URLS) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(baseUrl + path);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                connection.getOutputStream().write(payload);
+
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException(K.API_ERROR + code);
+                }
+                return;
+            } catch (Exception e) {
+                lastError = e;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+
+        if (lastError != null) {
+            throw lastError;
+        }
+    }
+
+    private String fetchHealth() throws Exception {
+        Exception lastError = null;
+        for (String baseUrl : API_BASE_URLS) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(baseUrl + "/api/health");
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException(K.API_ERROR + code);
+                }
+                readBody(connection.getInputStream());
+                return baseUrl;
+            } catch (Exception e) {
+                lastError = e;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+
+        if (lastError != null) {
+            throw lastError;
+        }
+        return "";
+    }
+
+    private String readBody(InputStream stream) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
+        StringBuilder builder = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            builder.append(line);
+        }
+        reader.close();
+        return builder.toString();
+    }
+
+    private void showLoading(String keyword) {
+        currentPage = PAGE_RESULT;
+        LinearLayout page = basePage(K.LOADING_TITLE, true);
+
+        LinearLayout resultCard = card(page);
+        ProgressBar progressBar = new ProgressBar(this);
+        resultCard.setGravity(Gravity.CENTER_HORIZONTAL);
+        resultCard.addView(progressBar, new LinearLayout.LayoutParams(dp(72), dp(72)));
+
+        TextView loading = text(K.LOADING_MESSAGE, 22, "#17202A", true);
+        loading.setGravity(Gravity.CENTER);
+        loading.setPadding(0, dp(18), 0, 0);
+        resultCard.addView(loading);
+        setPage(page);
+    }
+
+    private void showResult(String keyword, ItemInfo item, String errorMessage) {
+        currentPage = PAGE_RESULT;
+
+        LinearLayout page = basePage(K.RESULT_TITLE, true);
+        LinearLayout resultCard = card(page);
+
+        if (errorMessage != null) {
+            TextView headline = text(K.API_UNAVAILABLE, 30, "#17202A", true);
+            resultCard.addView(headline);
+            addInfoRow(resultCard, K.STATUS_LABEL, K.API_CHECK_GUIDE);
+            addInfoRow(resultCard, K.ADDRESS_LABEL, API_BASE_URLS[0]);
+        } else if (item != null) {
+            TextView headline = text(item.name + K.FOUND_SUFFIX, 30, "#17202A", true);
+            resultCard.addView(headline);
+            addInfoRow(resultCard, K.LOCATION_LABEL, item.location);
+            addInfoRow(resultCard, K.DRAWER_LABEL, item.drawerNumber + K.DRAWER_SUFFIX);
+            addInfoRow(resultCard, K.QUANTITY_LABEL, item.quantity + K.QUANTITY_SUFFIX);
+        } else {
+            TextView headline = text(K.NOT_FOUND_TITLE, 30, "#17202A", true);
+            resultCard.addView(headline);
+            addInfoRow(resultCard, K.STATUS_LABEL, K.NOT_FOUND_STATUS);
+            addInfoRow(resultCard, K.GUIDE_LABEL, K.NOT_FOUND_GUIDE);
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.EXIT_BUTTON, false, v -> showHome());
+        addButton(row, K.SEARCH_AGAIN_BUTTON, true, v -> showFindPage());
+
+        setPage(page);
+    }
+
+    private void showSimpleLoading(String title, String message) {
+        LinearLayout page = basePage(title, true);
+        LinearLayout resultCard = card(page);
+        resultCard.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        ProgressBar progressBar = new ProgressBar(this);
+        resultCard.addView(progressBar, new LinearLayout.LayoutParams(dp(72), dp(72)));
+
+        TextView loading = text(message, 26, "#17202A", true);
+        loading.setGravity(Gravity.CENTER);
+        loading.setPadding(0, dp(18), 0, 0);
+        resultCard.addView(loading);
+        setPage(page);
+    }
+
+    private void showSimpleError(String title, String message) {
+        currentPage = PAGE_RESULT;
+        LinearLayout page = basePage(title, true);
+        LinearLayout resultCard = card(page);
+        TextView headline = text(K.API_UNAVAILABLE, 32, "#17202A", true);
+        resultCard.addView(headline);
+        addInfoRow(resultCard, K.STATUS_LABEL, message == null ? K.UNKNOWN_ERROR : message);
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+    }
+
+    private void showDbStatus(boolean connected, String baseUrl, String errorMessage) {
+        currentPage = PAGE_DB_STATUS;
+
+        LinearLayout page = basePage(K.DB_STATUS_TITLE, true);
+        LinearLayout resultCard = card(page);
+        if (connected) {
+            TextView headline = text(K.DB_CONNECTED, 34, "#17202A", true);
+            resultCard.addView(headline);
+            addInfoRow(resultCard, K.STATUS_LABEL, K.DB_CONNECTED_STATUS);
+            addInfoRow(resultCard, K.ADDRESS_LABEL, baseUrl);
+            addLedStatus(resultCard, K.DB_READY_BADGE);
+        } else {
+            TextView headline = text(K.DB_DISCONNECTED, 34, "#17202A", true);
+            resultCard.addView(headline);
+            addInfoRow(resultCard, K.STATUS_LABEL, errorMessage == null ? K.UNKNOWN_ERROR : errorMessage);
+            addInfoRow(resultCard, K.GUIDE_LABEL, K.API_CHECK_GUIDE);
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.RECHECK_BUTTON, false, v -> checkDbStatus());
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+    }
+
+    private LinearLayout basePage(String title, boolean showBack) {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(56), dp(38), dp(56), dp(34));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(header, matchWrap(0, 24));
+
+        if (showBack) {
+            Button back = new Button(this);
+            back.setText("<");
+            back.setTextSize(30);
+            back.setTextColor(Color.parseColor("#17202A"));
+            back.setBackground(bg("#FFFFFF", "#D7DEE8", 8));
+            back.setOnClickListener(v -> onBackPressed());
+            header.addView(back, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        }
+
+        LinearLayout titleBox = new LinearLayout(this);
+        titleBox.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        if (showBack) {
+            titleParams.setMargins(dp(16), 0, 0, 0);
+        }
+        header.addView(titleBox, titleParams);
+
+        TextView titleView = text(title, 42, "#17202A", true);
+        titleBox.addView(titleView);
+
+        return content;
+    }
+
+    private void setPage(LinearLayout content) {
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.addView(content);
+        pageRoot.removeAllViews();
+        pageRoot.addView(scrollView);
+    }
+
+    private LinearLayout horizontal(LinearLayout parent) {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        parent.addView(layout, matchWrap(0, 22));
+        return layout;
+    }
+
+    private LinearLayout compactRow(LinearLayout parent) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        parent.addView(row, matchHeight(82, 0, 12));
+        return row;
+    }
+
+    private void addCompactInput(LinearLayout row, EditText input) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1);
+        params.setMargins(dp(8), 0, dp(8), 0);
+        row.addView(input, params);
+    }
+
+    private LinearLayout card(LinearLayout parent) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(44), dp(36), dp(44), dp(36));
+        card.setBackground(bg("#FFFFFF", "#D7DEE8", 10));
+        parent.addView(card, matchWrap(0, 24));
+        return card;
+    }
+
+    private void addMenuCard(LinearLayout parent, String title, View.OnClickListener listener) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(30), dp(26), dp(30), dp(26));
+        card.setBackground(bg("#FFFFFF", "#D7DEE8", 10));
+        card.setOnClickListener(listener);
+
+        TextView titleView = text(title, 34, "#17202A", true);
+        titleView.setGravity(Gravity.CENTER);
+        card.addView(titleView);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(390), 1);
+        params.setMargins(dp(10), 0, dp(10), 0);
+        parent.addView(card, params);
+    }
+
+    private void addHomeCard(LinearLayout parent, String title, String description, View.OnClickListener listener) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(40), dp(28), dp(40), dp(28));
+        card.setBackground(bg("#FFFFFF", "#D7DEE8", 10));
+        card.setOnClickListener(listener);
+
+        TextView titleView = text(title, 42, "#17202A", true);
+        titleView.setGravity(Gravity.CENTER);
+        card.addView(titleView);
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(360)
+        );
+        params.setMargins(dp(8), dp(8), dp(8), dp(18));
+        parent.addView(card, params);
+    }
+
+    private void addButton(LinearLayout parent, String label, boolean primary, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setTextSize(26);
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(primary ? Color.WHITE : Color.parseColor("#17202A"));
+        button.setBackground(primary ? bg("#1E40AF", "#1E40AF", 8) : bg("#FFFFFF", "#D7DEE8", 8));
+        button.setOnClickListener(listener);
+
+        LinearLayout.LayoutParams params;
+        if (parent.getOrientation() == LinearLayout.HORIZONTAL) {
+            params = new LinearLayout.LayoutParams(0, dp(92), 1);
+            params.setMargins(dp(10), 0, dp(10), 0);
+        } else {
+            params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
+            params.setMargins(0, 0, 0, dp(16));
+        }
+        parent.addView(button, params);
+    }
+
+    private EditText input(String hint) {
+        EditText editText = new EditText(this);
+        editText.setHint(hint);
+        editText.setSingleLine(true);
+        editText.setTextSize(30);
+        editText.setTextColor(Color.parseColor("#17202A"));
+        editText.setHintTextColor(Color.parseColor("#98A2B3"));
+        editText.setPadding(dp(20), 0, dp(20), 0);
+        editText.setBackground(bg("#FFFFFF", "#D7DEE8", 8));
+        return editText;
+    }
+
+    private void addInfoRow(LinearLayout parent, String label, String value) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(18), 0, 0);
+
+        TextView labelView = text(label, 26, "#657184", true);
+        row.addView(labelView, new LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView valueView = text(value, 30, "#17202A", false);
+        row.addView(valueView, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        parent.addView(row);
+    }
+
+    private void addLedStatus(LinearLayout parent, String value) {
+        TextView badge = text(value, 30, "#0F7A3B", true);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(bg("#E8F7EF", "#A7D7BC", 8));
+        parent.addView(badge, matchHeight(64, 24, 0));
+    }
+
+    private void addVoiceGuide(LinearLayout parent, String value) {
+        TextView guide = text(value, 26, "#1E40AF", true);
+        guide.setGravity(Gravity.CENTER);
+        guide.setBackground(bg("#EAF1FF", "#9DB7E8", 8));
+        parent.addView(guide, matchHeight(72, 18, 0));
+    }
+
+    private TextView text(String value, int size, String color, boolean bold) {
+        TextView textView = new TextView(this);
+        textView.setText(value);
+        textView.setTextSize(size);
+        textView.setTextColor(Color.parseColor(color));
+        textView.setTypeface(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL);
+        textView.setIncludeFontPadding(true);
+        return textView;
+    }
+
+    private LinearLayout.LayoutParams matchWrap(int top, int bottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(top), 0, dp(bottom));
+        return params;
+    }
+
+    private LinearLayout.LayoutParams matchHeight(int height, int top, int bottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(height)
+        );
+        params.setMargins(0, dp(top), 0, dp(bottom));
+        return params;
+    }
+
+    private GradientDrawable bg(String fill, String stroke, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.parseColor(fill));
+        drawable.setStroke(dp(1), Color.parseColor(stroke));
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    private void applyTemiImmersiveMode() {
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        );
+    }
+
+    private static class ItemInfo {
+        final String name;
+        final String location;
+        final int drawerNumber;
+        final int quantity;
+
+        ItemInfo(String name, String location, int drawerNumber, int quantity) {
+            this.name = name;
+            this.location = location;
+            this.drawerNumber = drawerNumber;
+            this.quantity = quantity;
+        }
+    }
+
+    private static class K {
+        static final String HOME_TITLE = "\uD648 \uD654\uBA74";
+        static final String FIND_CARD_TITLE = "\uC11C\uB78D \uC18D \uBB3C\uAC74 \uCC3E\uAE30";
+        static final String REGISTER_CARD_TITLE = "\uBB3C\uAC74 \uB4F1\uB85D";
+        static final String DB_STATUS_CARD_TITLE = "DB \uC0C1\uD0DC";
+        static final String FIND_TITLE = "\uBB3C\uAC74 \uCC3E\uAE30";
+        static final String ITEM_NAME_INPUT = "\uCC3E\uC744 \uBB3C\uAC74\uC744 \uC785\uB825\uD558\uC138\uC694";
+        static final String VOICE_BUTTON = "\uC74C\uC131 \uC778\uC2DD";
+        static final String SEARCH_BUTTON = "\uAC80\uC0C9";
+        static final String VOICE_TODO = "\uC74C\uC131 \uC778\uC2DD \uC5F0\uB3D9\uC740 \uB2E4\uC74C \uB2E8\uACC4\uC785\uB2C8\uB2E4.";
+        static final String EMPTY_KEYWORD = "\uCC3E\uC744 \uBB3C\uAC74\uC744 \uC785\uB825\uD558\uC138\uC694.";
+        static final String API_ERROR = "API \uC624\uB958: ";
+        static final String REGISTER_TITLE = "\uBB3C\uAC74 \uB4F1\uB85D";
+        static final String REGISTER_NAME_HINT = "\uBB3C\uAC74\uBA85";
+        static final String REGISTER_DRAWER_HINT = "\uC11C\uB78D \uBC88\uD638";
+        static final String REGISTER_QUANTITY_HINT = "\uC218\uB7C9";
+        static final String REGISTER_BUTTON = "\uB4F1\uB85D";
+        static final String REGISTER_EMPTY = "\uBAA8\uB4E0 \uD56D\uBAA9\uC744 \uC785\uB825\uD558\uC138\uC694.";
+        static final String REGISTER_NUMBER_ERROR = "\uC11C\uB78D, \uC218\uB7C9\uC740 \uC22B\uC790\uB85C \uC785\uB825\uD558\uC138\uC694.";
+        static final String REGISTERING_TITLE = "\uB4F1\uB85D \uC911";
+        static final String REGISTERING_MESSAGE = "DB\uC5D0 \uBB3C\uAC74 \uC704\uCE58\uB97C \uC800\uC7A5\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String REGISTER_DONE_TITLE = "\uB4F1\uB85D \uC644\uB8CC";
+        static final String REGISTER_DONE_MESSAGE = "\uBB3C\uAC74\uC744 DB\uC5D0 \uB4F1\uB85D\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String REGISTER_FAIL_TITLE = "\uB4F1\uB85D \uC2E4\uD328";
+        static final String SEARCH_NOW_BUTTON = "\uBC14\uB85C \uCC3E\uAE30";
+        static final String HOME_BUTTON = "\uD648\uC73C\uB85C";
+        static final String DB_STATUS_TITLE = "DB \uC0C1\uD0DC";
+        static final String DB_CHECKING_MESSAGE = "API \uC11C\uBC84\uC5D0 \uC5F0\uACB0\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String DB_CONNECTED = "DB \uC5F0\uACB0 \uC131\uACF5";
+        static final String DB_CONNECTED_STATUS = "\uD14C\uBBF8\uAC00 API \uC11C\uBC84\uC5D0 \uC811\uC18D\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String DB_READY_BADGE = "\uBB3C\uAC74 \uB4F1\uB85D\uACFC \uAC80\uC0C9 \uC0AC\uC6A9 \uAC00\uB2A5";
+        static final String DB_DISCONNECTED = "DB \uC5F0\uACB0 \uC2E4\uD328";
+        static final String RECHECK_BUTTON = "\uB2E4\uC2DC \uD655\uC778";
+        static final String UNKNOWN_ERROR = "\uC54C \uC218 \uC5C6\uB294 \uC624\uB958";
+        static final String LOADING_TITLE = "\uAC80\uC0C9 \uC911";
+        static final String LOADING_MESSAGE = "DB\uC5D0\uC11C \uBB3C\uAC74 \uC704\uCE58\uB97C \uD655\uC778\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String RESULT_TITLE = "\uAC80\uC0C9 \uACB0\uACFC";
+        static final String API_UNAVAILABLE = "API \uC11C\uBC84\uC5D0 \uC5F0\uACB0\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
+        static final String API_CHECK_GUIDE = "\uC11C\uBC84 \uC2E4\uD589 \uB610\uB294 Wi-Fi \uC5F0\uACB0\uC744 \uD655\uC778\uD558\uC138\uC694.";
+        static final String FOUND_SUFFIX = " \uC704\uCE58\uB97C \uCC3E\uC558\uC2B5\uB2C8\uB2E4.";
+        static final String NOT_FOUND_TITLE = "\uB4F1\uB85D\uB418\uC9C0 \uC54A\uC740 \uBB3C\uAC74\uC785\uB2C8\uB2E4.";
+        static final String NOT_FOUND_STATUS = "DB\uC5D0\uC11C \uBB3C\uAC74 \uC815\uBCF4\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
+        static final String NOT_FOUND_GUIDE = "\uBB3C\uAC74\uBA85\uC744 \uB2E4\uC2DC \uD655\uC778\uD558\uAC70\uB098 \uC0C8 \uBB3C\uAC74\uC744 \uB4F1\uB85D\uD558\uC138\uC694.";
+        static final String STATUS_LABEL = "\uC0C1\uD0DC";
+        static final String ADDRESS_LABEL = "\uC8FC\uC18C";
+        static final String LOCATION_LABEL = "\uC704\uCE58";
+        static final String DRAWER_LABEL = "\uC11C\uB78D";
+        static final String QUANTITY_LABEL = "\uC218\uB7C9";
+        static final String GUIDE_LABEL = "\uC548\uB0B4";
+        static final String DRAWER_SUFFIX = "\uBC88 \uC11C\uB78D";
+        static final String QUANTITY_SUFFIX = "\uAC1C";
+        static final String LED_SUFFIX = "\uBC88 \uC810\uB4F1 \uC911";
+        static final String TEMI_GUIDE_PREFIX = "Temi \uC74C\uC131 \uC548\uB0B4: ";
+        static final String MOVE_SUFFIX = "\uC73C\uB85C \uC774\uB3D9\uD558\uC138\uC694.";
+        static final String EXIT_BUTTON = "\uC885\uB8CC";
+        static final String SEARCH_AGAIN_BUTTON = "\uB2E4\uC2DC \uAC80\uC0C9";
+    }
+}

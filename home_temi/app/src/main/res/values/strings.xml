@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Item</string>
+    <string name="dashboard_title">AGI Temi Shopping</string>
+    <string name="dashboard_subtitle">스마트 서랍장, 가족 쇼핑 리스트, 매장 Temi 연동 대시보드</string>
+    <string name="settings_short">설정</string>
+    <string name="status_online">집 Temi 연결됨</string>
+    <string name="status_store">매장 Temi 대기</string>
+    <string name="voice_search">음성 검색</string>
+    <string name="store_temi">매장 Temi</string>
+    <string name="section_devices">연동 기기</string>
+    <string name="drawer_one">1번 서랍장\n2단 / 정상\n세제, 종이컵</string>
+    <string name="drawer_two">2번 서랍장\n3단 / 점검 필요\n건전지 부족</string>
+    <string name="section_workflow">주요 경로</string>
+    <string name="smart_storage">수납추가</string>
+    <string name="family_shopping">쇼핑리스트</string>
+    <string name="db_lookup">DB 조회</string>
+    <string name="detail_home_title">홈 페이지</string>
+    <string name="detail_home_body">기획안 기준 최초 노출 화면입니다. 수납추가, 쇼핑리스트, DB 조회, 설정으로 이동하고 현재 Temi와 스마트 서랍장 연결 상태를 확인합니다.</string>
+</resources>
