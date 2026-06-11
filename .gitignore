@@ -1,0 +1,54 @@
+# Root .gitignore for combined Arduino + Android project
+
+# Android Studio / Gradle
+.gradle/
+**/build/
+**/out/
+**/captures/
+**/local.properties
+**/.idea/
+**/.cxx/
+**/.externalNativeBuild/
+*.iml
+*.hprof
+*.apk
+*.ap_
+*.aab
+*.keystore
+*.jks
+.DS_Store
+
+# Android logs and temp
+*.log
+*.tmp
+*.orig
+
+# Arduino build artifacts
+arduino/**/build/
+arduino/**/*.o
+arduino/**/*.elf
+arduino/**/*.hex
+arduino/**/*.bin
+arduino/**/*.eep
+arduino/**/*.map
+arduino/**/*.d
+arduino/**/*.log
+arduino/**/*.tmp
+arduino/**/*.cache
+
+# Python / backend artifacts
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite
+*.log
+
+# VS Code
+.vscode/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+*.DS_Store
