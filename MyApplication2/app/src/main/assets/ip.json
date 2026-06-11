@@ -1,0 +1,14 @@
+{
+  "api_base_url": "http://10.0.2.2:18000",
+  "server_base_url": "http://172.17.68.60:8000",
+  "emulator_base_url": "http://10.0.2.2:18000",
+  "proxy_base_url": "http://10.0.2.2:18000",
+  "server_ip": "172.17.68.60",
+  "server_port": 8000,
+  "legacy_server_urls": [
+    "http://10.136.55.25:8000",
+    "http://172.17.67.210:8000",
+    "http://172.17.79.72:8000",
+    "http://172.17.76.159:8000"
+  ]
+}
