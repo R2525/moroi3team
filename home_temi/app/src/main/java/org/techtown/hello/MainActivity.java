@@ -1,5 +1,6 @@
 package org.techtown.hello;
 
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -11,6 +12,7 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -19,14 +21,11 @@ import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import org.json.JSONObject;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.common.BitMatrix;
 
-import java.io.BufferedReader;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.net.URLEncoder;
+import org.json.JSONObject;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PAGE_HOME = "HOME";
@@ -34,14 +33,12 @@ public class MainActivity extends AppCompatActivity {
     private static final String PAGE_RESULT = "RESULT";
     private static final String PAGE_REGISTER = "REGISTER";
     private static final String PAGE_DB_STATUS = "DB_STATUS";
-    private static final String[] API_BASE_URLS = {
-            "http://127.0.0.1:8000",
-            "http://10.0.2.2:8000",
-            "http://172.17.76.159:8000",
-            "http://172.17.79.72:8000"
-    };
+    private static final String PAGE_UPLOAD = "UPLOAD";
 
     private FrameLayout pageRoot;
+    private TemiDbHelper localDb;
+    private TemiLocalServer localServer;
+    private String localServerUrl = "";
     private String currentPage = PAGE_HOME;
     private EditText searchInput;
     private EditText registerNameInput;
@@ -63,12 +60,28 @@ public class MainActivity extends AppCompatActivity {
         pageRoot.setBackgroundColor(Color.parseColor("#F5F7FA"));
         setContentView(pageRoot);
 
+        localDb = new TemiDbHelper(this);
+        localServer = new TemiLocalServer(this, localDb);
+        localServer.start();
+        localServerUrl = localServer.getBaseUrl();
+
         String launchKeyword = getIntent().getStringExtra("search_keyword");
         if (launchKeyword != null && !launchKeyword.trim().isEmpty()) {
             searchItem(launchKeyword.trim());
         } else {
             showHome();
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (localServer != null) {
+            localServer.stop();
+        }
+        if (localDb != null) {
+            localDb.close();
+        }
+        super.onDestroy();
     }
 
     @Override
@@ -97,6 +110,7 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout menuRow = horizontal(page);
         addMenuCard(menuRow, K.FIND_CARD_TITLE, v -> showFindPage());
         addMenuCard(menuRow, K.REGISTER_CARD_TITLE, v -> showRegisterPage());
+        addMenuCard(menuRow, K.UPLOAD_CARD_TITLE, v -> showUploadPage());
         addMenuCard(menuRow, K.DB_STATUS_CARD_TITLE, v -> checkDbStatus());
         setPage(page);
     }
@@ -165,12 +179,55 @@ public class MainActivity extends AppCompatActivity {
         showSimpleLoading(K.REGISTERING_TITLE, K.REGISTERING_MESSAGE);
         new Thread(() -> {
             try {
-                postPlacement(name, drawerNumber, quantity);
-                runOnUiThread(() -> showRegisterSuccess(name, drawerNumber, quantity));
+                JSONObject session = localDb.startStorageSession(name, drawerNumber, quantity);
+                runOnUiThread(() -> showStorageWaiting(session));
             } catch (Exception e) {
                 runOnUiThread(() -> showSimpleError(K.REGISTER_FAIL_TITLE, e.getMessage()));
             }
         }).start();
+    }
+
+    private void showStorageWaiting(JSONObject session) {
+        currentPage = PAGE_RESULT;
+        LinearLayout page = basePage(K.STORAGE_WAIT_TITLE, true);
+        LinearLayout resultCard = card(page);
+        String name = session.optString("item_name");
+        int drawerNumber = session.optInt("target_drawer_number");
+        int quantity = session.optInt("quantity", 1);
+        TextView headline = text(K.STORAGE_WAIT_MESSAGE, 32, "#17202A", true);
+        resultCard.addView(headline);
+        addInfoRow(resultCard, K.ITEM_LABEL, name);
+        addInfoRow(resultCard, K.DRAWER_LABEL, drawerNumber + K.DRAWER_SUFFIX);
+        addInfoRow(resultCard, K.QUANTITY_LABEL, quantity + K.QUANTITY_SUFFIX);
+        addInfoRow(resultCard, K.STATUS_LABEL, session.optString("message", K.SENSOR_WAITING));
+        addInfoRow(resultCard, K.ARDUINO_LABEL, localServerUrl + "/api/sensor-events");
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.REFRESH_BUTTON, false, v -> refreshStorageSession());
+        addButton(row, K.MANUAL_SAVE_BUTTON, true, v -> saveSessionManually(name, drawerNumber, quantity));
+        setPage(page);
+    }
+
+    private void refreshStorageSession() {
+        try {
+            JSONObject session = localDb.getActiveStorageSession();
+            if (session == null) {
+                showSimpleError(K.STORAGE_WAIT_TITLE, K.STORAGE_DONE_OR_NONE);
+            } else {
+                showStorageWaiting(session);
+            }
+        } catch (Exception e) {
+            showSimpleError(K.STORAGE_WAIT_TITLE, e.getMessage());
+        }
+    }
+
+    private void saveSessionManually(String name, int drawerNumber, int quantity) {
+        try {
+            postPlacement(name, drawerNumber, quantity);
+            showRegisterSuccess(name, drawerNumber, quantity);
+        } catch (Exception e) {
+            showSimpleError(K.REGISTER_FAIL_TITLE, e.getMessage());
+        }
     }
 
     private void showRegisterSuccess(String name, int drawerNumber, int quantity) {
@@ -215,41 +272,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private ItemInfo fetchItem(String keyword) throws Exception {
-        String encoded = URLEncoder.encode(keyword, "UTF-8");
-        Exception lastError = null;
-        for (String baseUrl : API_BASE_URLS) {
-            HttpURLConnection connection = null;
-            try {
-                URL url = new URL(baseUrl + "/api/items/search?name=" + encoded);
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(2500);
-                connection.setReadTimeout(2500);
-
-                int code = connection.getResponseCode();
-                InputStream stream = code >= 200 && code < 300
-                        ? connection.getInputStream()
-                        : connection.getErrorStream();
-                String body = readBody(stream);
-
-                if (code < 200 || code >= 300) {
-                    throw new IllegalStateException(K.API_ERROR + code);
-                }
-
-                return parseItem(keyword, body);
-            } catch (Exception e) {
-                lastError = e;
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-        }
-
-        if (lastError != null) {
-            throw lastError;
-        }
-        return null;
+        return parseItem(keyword, localDb.findItem(keyword).toString());
     }
 
     private ItemInfo parseItem(String keyword, String body) throws Exception {
@@ -267,89 +290,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void postPlacement(String name, int drawerNumber, int quantity) throws Exception {
-        JSONObject json = new JSONObject();
-        json.put("item_name", name);
-        json.put("drawer_number", drawerNumber);
-        json.put("quantity", quantity);
-        postJson("/api/placements", json.toString());
-    }
-
-    private void postJson(String path, String body) throws Exception {
-        Exception lastError = null;
-        byte[] payload = body.getBytes("UTF-8");
-
-        for (String baseUrl : API_BASE_URLS) {
-            HttpURLConnection connection = null;
-            try {
-                URL url = new URL(baseUrl + path);
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("POST");
-                connection.setConnectTimeout(2500);
-                connection.setReadTimeout(2500);
-                connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-                connection.getOutputStream().write(payload);
-
-                int code = connection.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    throw new IllegalStateException(K.API_ERROR + code);
-                }
-                return;
-            } catch (Exception e) {
-                lastError = e;
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-        }
-
-        if (lastError != null) {
-            throw lastError;
-        }
+        localDb.savePlacement(name, drawerNumber, quantity, "manual");
     }
 
     private String fetchHealth() throws Exception {
-        Exception lastError = null;
-        for (String baseUrl : API_BASE_URLS) {
-            HttpURLConnection connection = null;
-            try {
-                URL url = new URL(baseUrl + "/api/health");
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(2500);
-                connection.setReadTimeout(2500);
-
-                int code = connection.getResponseCode();
-                if (code < 200 || code >= 300) {
-                    throw new IllegalStateException(K.API_ERROR + code);
-                }
-                readBody(connection.getInputStream());
-                return baseUrl;
-            } catch (Exception e) {
-                lastError = e;
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-        }
-
-        if (lastError != null) {
-            throw lastError;
-        }
-        return "";
-    }
-
-    private String readBody(InputStream stream) throws Exception {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+        localDb.health();
+        localServerUrl = localServer.getBaseUrl();
+        return localServerUrl;
     }
 
     private void showLoading(String keyword) {
@@ -378,7 +325,7 @@ public class MainActivity extends AppCompatActivity {
             TextView headline = text(K.API_UNAVAILABLE, 30, "#17202A", true);
             resultCard.addView(headline);
             addInfoRow(resultCard, K.STATUS_LABEL, K.API_CHECK_GUIDE);
-            addInfoRow(resultCard, K.ADDRESS_LABEL, API_BASE_URLS[0]);
+            addInfoRow(resultCard, K.ADDRESS_LABEL, localServerUrl);
         } else if (item != null) {
             TextView headline = text(item.name + K.FOUND_SUFFIX, 30, "#17202A", true);
             resultCard.addView(headline);
@@ -393,10 +340,88 @@ public class MainActivity extends AppCompatActivity {
         }
 
         LinearLayout row = horizontal(page);
-        addButton(row, K.EXIT_BUTTON, false, v -> showHome());
+        if (item != null) {
+            addButton(row, K.DELETE_BUTTON, false, v -> deleteItem(item.name));
+        } else {
+            addButton(row, K.EXIT_BUTTON, false, v -> showHome());
+        }
         addButton(row, K.SEARCH_AGAIN_BUTTON, true, v -> showFindPage());
 
         setPage(page);
+    }
+
+    private void deleteItem(String name) {
+        if (localDb.deleteItemByName(name)) {
+            toast(K.DELETE_DONE);
+            showHome();
+        } else {
+            toast(K.DELETE_FAIL);
+        }
+    }
+
+    private void showUploadPage() {
+        currentPage = PAGE_UPLOAD;
+        localServerUrl = localServer.getBaseUrl();
+        String uploadUrl = localServerUrl + "/upload";
+
+        LinearLayout page = basePage(K.UPLOAD_TITLE, true);
+        LinearLayout resultCard = card(page);
+        TextView headline = text(K.UPLOAD_GUIDE, 32, "#17202A", true);
+        resultCard.addView(headline);
+        addInfoRow(resultCard, K.ADDRESS_LABEL, uploadUrl);
+
+        ImageView qrView = new ImageView(this);
+        qrView.setBackgroundColor(Color.WHITE);
+        qrView.setPadding(dp(16), dp(16), dp(16), dp(16));
+        try {
+            qrView.setImageBitmap(createQrBitmap(uploadUrl, dp(360)));
+        } catch (Exception e) {
+            TextView fallback = text(uploadUrl, 26, "#17202A", true);
+            fallback.setGravity(Gravity.CENTER);
+            resultCard.addView(fallback, matchHeight(130, 18, 0));
+        }
+        resultCard.addView(qrView, new LinearLayout.LayoutParams(dp(390), dp(390)));
+
+        LinearLayout row = horizontal(page);
+        addButton(row, K.LATEST_UPLOAD_BUTTON, false, v -> showLatestUpload());
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+    }
+
+    private void showLatestUpload() {
+        try {
+            JSONObject latest = localDb.latestPhotoUpload();
+            LinearLayout page = basePage(K.LATEST_UPLOAD_TITLE, true);
+            LinearLayout resultCard = card(page);
+            if (!latest.optBoolean("found", false)) {
+                resultCard.addView(text(K.NO_UPLOAD, 32, "#17202A", true));
+            } else {
+                resultCard.addView(text(K.UPLOAD_FOUND, 32, "#17202A", true));
+                addInfoRow(resultCard, K.STATUS_LABEL, latest.optString("status"));
+                addInfoRow(resultCard, K.ADDRESS_LABEL, latest.optString("file_path"));
+                JSONObject result = latest.optJSONObject("result");
+                if (result != null) {
+                    addInfoRow(resultCard, K.GUIDE_LABEL, result.optString("warning", result.toString()));
+                }
+            }
+            LinearLayout row = horizontal(page);
+            addButton(row, K.UPLOAD_TITLE, false, v -> showUploadPage());
+            addButton(row, K.HOME_BUTTON, true, v -> showHome());
+            setPage(page);
+        } catch (Exception e) {
+            showSimpleError(K.LATEST_UPLOAD_TITLE, e.getMessage());
+        }
+    }
+
+    private Bitmap createQrBitmap(String text, int size) throws Exception {
+        BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+        for (int x = 0; x < size; x++) {
+            for (int y = 0; y < size; y++) {
+                bitmap.setPixel(x, y, matrix.get(x, y) ? Color.BLACK : Color.WHITE);
+            }
+        }
+        return bitmap;
     }
 
     private void showSimpleLoading(String title, String message) {
@@ -693,6 +718,7 @@ public class MainActivity extends AppCompatActivity {
         static final String HOME_TITLE = "\uD648 \uD654\uBA74";
         static final String FIND_CARD_TITLE = "\uC11C\uB78D \uC18D \uBB3C\uAC74 \uCC3E\uAE30";
         static final String REGISTER_CARD_TITLE = "\uBB3C\uAC74 \uB4F1\uB85D";
+        static final String UPLOAD_CARD_TITLE = "\uC0AC\uC9C4 \uC5C5\uB85C\uB4DC";
         static final String DB_STATUS_CARD_TITLE = "DB \uC0C1\uD0DC";
         static final String FIND_TITLE = "\uBB3C\uAC74 \uCC3E\uAE30";
         static final String ITEM_NAME_INPUT = "\uCC3E\uC744 \uBB3C\uAC74\uC744 \uC785\uB825\uD558\uC138\uC694";
@@ -709,7 +735,7 @@ public class MainActivity extends AppCompatActivity {
         static final String REGISTER_EMPTY = "\uBAA8\uB4E0 \uD56D\uBAA9\uC744 \uC785\uB825\uD558\uC138\uC694.";
         static final String REGISTER_NUMBER_ERROR = "\uC11C\uB78D, \uC218\uB7C9\uC740 \uC22B\uC790\uB85C \uC785\uB825\uD558\uC138\uC694.";
         static final String REGISTERING_TITLE = "\uB4F1\uB85D \uC911";
-        static final String REGISTERING_MESSAGE = "DB\uC5D0 \uBB3C\uAC74 \uC704\uCE58\uB97C \uC800\uC7A5\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String REGISTERING_MESSAGE = "\uC11C\uB78D \uC13C\uC11C \uB9E4\uCE6D\uC744 \uC900\uBE44\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
         static final String REGISTER_DONE_TITLE = "\uB4F1\uB85D \uC644\uB8CC";
         static final String REGISTER_DONE_MESSAGE = "\uBB3C\uAC74\uC744 DB\uC5D0 \uB4F1\uB85D\uD588\uC2B5\uB2C8\uB2E4.";
         static final String REGISTER_FAIL_TITLE = "\uB4F1\uB85D \uC2E4\uD328";
@@ -718,7 +744,7 @@ public class MainActivity extends AppCompatActivity {
         static final String DB_STATUS_TITLE = "DB \uC0C1\uD0DC";
         static final String DB_CHECKING_MESSAGE = "API \uC11C\uBC84\uC5D0 \uC5F0\uACB0\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
         static final String DB_CONNECTED = "DB \uC5F0\uACB0 \uC131\uACF5";
-        static final String DB_CONNECTED_STATUS = "\uD14C\uBBF8\uAC00 API \uC11C\uBC84\uC5D0 \uC811\uC18D\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String DB_CONNECTED_STATUS = "\uD14C\uBBF8 \uB0B4\uBD80 DB\uC640 \uC6F9\uC11C\uBC84\uAC00 \uC900\uBE44\uB410\uC2B5\uB2C8\uB2E4.";
         static final String DB_READY_BADGE = "\uBB3C\uAC74 \uB4F1\uB85D\uACFC \uAC80\uC0C9 \uC0AC\uC6A9 \uAC00\uB2A5";
         static final String DB_DISCONNECTED = "DB \uC5F0\uACB0 \uC2E4\uD328";
         static final String RECHECK_BUTTON = "\uB2E4\uC2DC \uD655\uC778";
@@ -733,6 +759,8 @@ public class MainActivity extends AppCompatActivity {
         static final String NOT_FOUND_STATUS = "DB\uC5D0\uC11C \uBB3C\uAC74 \uC815\uBCF4\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
         static final String NOT_FOUND_GUIDE = "\uBB3C\uAC74\uBA85\uC744 \uB2E4\uC2DC \uD655\uC778\uD558\uAC70\uB098 \uC0C8 \uBB3C\uAC74\uC744 \uB4F1\uB85D\uD558\uC138\uC694.";
         static final String STATUS_LABEL = "\uC0C1\uD0DC";
+        static final String ITEM_LABEL = "\uBB3C\uAC74";
+        static final String ARDUINO_LABEL = "UNO Q";
         static final String ADDRESS_LABEL = "\uC8FC\uC18C";
         static final String LOCATION_LABEL = "\uC704\uCE58";
         static final String DRAWER_LABEL = "\uC11C\uB78D";
@@ -745,5 +773,20 @@ public class MainActivity extends AppCompatActivity {
         static final String MOVE_SUFFIX = "\uC73C\uB85C \uC774\uB3D9\uD558\uC138\uC694.";
         static final String EXIT_BUTTON = "\uC885\uB8CC";
         static final String SEARCH_AGAIN_BUTTON = "\uB2E4\uC2DC \uAC80\uC0C9";
+        static final String DELETE_BUTTON = "\uC0AD\uC81C";
+        static final String DELETE_DONE = "\uBB3C\uAC74\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String DELETE_FAIL = "\uC0AD\uC81C\uD560 \uBB3C\uAC74\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String STORAGE_WAIT_TITLE = "\uC11C\uB78D \uB9E4\uCE6D \uB300\uAE30";
+        static final String STORAGE_WAIT_MESSAGE = "UNO Q \uC11C\uB78D \uC13C\uC11C\uB97C \uAE30\uB2E4\uB9BD\uB2C8\uB2E4.";
+        static final String SENSOR_WAITING = "\uC11C\uB78D \uC5F4\uB9BC/\uB2EB\uD798 \uC774\uBCA4\uD2B8\uB97C \uAE30\uB2E4\uB9AC\uB294 \uC911";
+        static final String STORAGE_DONE_OR_NONE = "\uC9C4\uD589 \uC911\uC778 \uC218\uB0A9 \uC791\uC5C5\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.";
+        static final String REFRESH_BUTTON = "\uC0C8\uB85C\uACE0\uCE68";
+        static final String MANUAL_SAVE_BUTTON = "\uC9C1\uC811 \uC800\uC7A5";
+        static final String UPLOAD_TITLE = "\uC0AC\uC9C4 \uC5C5\uB85C\uB4DC";
+        static final String UPLOAD_GUIDE = "\uD734\uB300\uD3F0\uC73C\uB85C QR\uC744 \uC2A4\uCE94\uD558\uC5EC \uC0AC\uC9C4\uC744 \uC62C\uB9AC\uC138\uC694.";
+        static final String LATEST_UPLOAD_BUTTON = "\uCD5C\uC2E0 \uACB0\uACFC";
+        static final String LATEST_UPLOAD_TITLE = "\uCD5C\uC2E0 \uC5C5\uB85C\uB4DC";
+        static final String NO_UPLOAD = "\uC544\uC9C1 \uC5C5\uB85C\uB4DC\uB41C \uC0AC\uC9C4\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.";
+        static final String UPLOAD_FOUND = "\uC0AC\uC9C4 \uC5C5\uB85C\uB4DC \uACB0\uACFC";
     }
 }
