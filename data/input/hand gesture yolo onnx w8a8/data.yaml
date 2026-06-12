@@ -1,0 +1,8 @@
+# Hand Gestures Dataset - YOLO Format
+path: /kaggle/working/hand-gestures-yolo
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 5
+names: ['hand-gestures', 'left', 'mvefrd', 'right', 'stop']

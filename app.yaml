@@ -1,0 +1,10 @@
+name: YOLO NPU Person Detector
+icon: 🔍
+description: YOLO person detection with real-time Web UI and QNN HTP/NPU acceleration.
+
+bricks:
+  - arduino:video_object_detection
+  - arduino:web_ui
+
+ports:
+  - 5001

@@ -1,0 +1,168 @@
+{
+    "model_id": "mediapipe_hand_gesture",
+    "model_name": "MediaPipe-Hand-Gesture-Recognition",
+    "runtime": "onnx",
+    "precision": "w8a8",
+    "tool_versions": {
+        "qairt": "2.42.0.251225135753_193295",
+        "onnx_runtime": "1.25.0"
+    },
+    "model_files": {
+        "palm_detector.onnx": {
+            "inputs": {
+                "image": {
+                    "shape": [
+                        1,
+                        3,
+                        256,
+                        256
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.003921568859368563,
+                        "zero_point": 0
+                    },
+                    "io_type": "image",
+                    "image_metadata": {},
+                    "value_range": [
+                        0.0,
+                        1.0
+                    ]
+                }
+            },
+            "outputs": {
+                "box_coords": {
+                    "shape": [
+                        1,
+                        2944,
+                        18
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 1.6417218446731567,
+                        "zero_point": 50
+                    }
+                },
+                "box_scores": {
+                    "shape": [
+                        1,
+                        2944
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.00390625,
+                        "zero_point": 0
+                    }
+                }
+            }
+        },
+        "hand_landmark_detector.onnx": {
+            "inputs": {
+                "image": {
+                    "shape": [
+                        1,
+                        3,
+                        224,
+                        224
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.003921568859368563,
+                        "zero_point": 0
+                    },
+                    "io_type": "image",
+                    "image_metadata": {},
+                    "value_range": [
+                        0.0,
+                        1.0
+                    ]
+                }
+            },
+            "outputs": {
+                "landmarks": {
+                    "shape": [
+                        1,
+                        63
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 1.1389596462249756,
+                        "zero_point": 47
+                    }
+                },
+                "scores": {
+                    "shape": [
+                        1,
+                        1
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.00390625,
+                        "zero_point": 0
+                    }
+                },
+                "lr": {
+                    "shape": [
+                        1,
+                        1
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.00390625,
+                        "zero_point": 0
+                    }
+                },
+                "world_landmarks": {
+                    "shape": [
+                        1,
+                        63
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.0009331408655270934,
+                        "zero_point": 123
+                    }
+                }
+            }
+        },
+        "canned_gesture_classifier.onnx": {
+            "inputs": {
+                "hand": {
+                    "shape": [
+                        1,
+                        64
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.012942158617079258,
+                        "zero_point": 147
+                    }
+                },
+                "mirrored_hand": {
+                    "shape": [
+                        1,
+                        64
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.012942158617079258,
+                        "zero_point": 147
+                    }
+                }
+            },
+            "outputs": {
+                "Identity": {
+                    "shape": [
+                        1,
+                        8
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.00390625,
+                        "zero_point": 0
+                    }
+                }
+            }
+        }
+    }
+}

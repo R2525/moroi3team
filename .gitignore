@@ -1,0 +1,7 @@
+# ignore app cache folder
+.cache/
+.env.hy-wifi
+venv/
+__pycache__/
+*.pyc
+data/output/

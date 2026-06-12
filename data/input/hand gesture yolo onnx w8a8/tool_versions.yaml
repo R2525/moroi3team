@@ -1,0 +1,8 @@
+tool_versions:
+  framework: ultralytics-yolov8
+  pytorch: 2.8.0
+  onnx: 1.20.1
+  onnx_opset: 12
+  precision: w8a8
+  training_platform: kaggle
+  gpu: nvidia-tesla-t4
