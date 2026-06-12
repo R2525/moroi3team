@@ -24,6 +24,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <meta-data
+            android:name="com.robotemi.sdk.metadata.SKILL"
+            android:value="@string/app_name" />
+        <meta-data
+            android:name="com.robotemi.sdk.metadata.KIOSK"
+            android:value="true" />
+        <meta-data
+            android:name="com.robotemi.sdk.metadata.OPEN_WITHOUT_INTERNET"
+            android:value="true" />
     </application>
 
 </manifest>

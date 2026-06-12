@@ -1,10 +1,13 @@
 package org.techtown.hello;
 
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -25,7 +28,12 @@ import com.google.zxing.BarcodeFormat;
 import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.common.BitMatrix;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PAGE_HOME = "HOME";
@@ -34,6 +42,13 @@ public class MainActivity extends AppCompatActivity {
     private static final String PAGE_REGISTER = "REGISTER";
     private static final String PAGE_DB_STATUS = "DB_STATUS";
     private static final String PAGE_UPLOAD = "UPLOAD";
+    private static final String PAGE_CONFIRM = "CONFIRM";
+    private static final String PAGE_PLACEMENT = "PLACEMENT";
+    private static final String PAGE_COMPLETE = "COMPLETE";
+    private static final String PAGE_SETTINGS = "SETTINGS";
+
+    private static final String PREFS_NAME = "temi_settings";
+    private static final String PREF_API_KEY = "gemini_api_key";
 
     private FrameLayout pageRoot;
     private TemiDbHelper localDb;
@@ -44,6 +59,12 @@ public class MainActivity extends AppCompatActivity {
     private EditText registerNameInput;
     private EditText registerDrawerInput;
     private EditText registerQuantityInput;
+
+    private final List<PendingItem> confirmItems = new ArrayList<>();
+    private final Handler placementHandler = new Handler();
+    private Runnable placementPoller;
+    private Runnable homeBatchWatcher;
+    private int placementShownIndex = -1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,6 +96,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        stopPlacementPolling();
+        stopHomeBatchWatch();
         if (localServer != null) {
             localServer.stop();
         }
@@ -96,6 +119,9 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (PAGE_HOME.equals(currentPage)) {
             super.onBackPressed();
+        } else if (PAGE_PLACEMENT.equals(currentPage)) {
+            stopPlacementPolling();
+            showHome();
         } else if (PAGE_RESULT.equals(currentPage)) {
             showFindPage();
         } else {
@@ -112,7 +138,9 @@ public class MainActivity extends AppCompatActivity {
         addMenuCard(menuRow, K.REGISTER_CARD_TITLE, v -> showRegisterPage());
         addMenuCard(menuRow, K.UPLOAD_CARD_TITLE, v -> showUploadPage());
         addMenuCard(menuRow, K.DB_STATUS_CARD_TITLE, v -> checkDbStatus());
+        addMenuCard(menuRow, "설정", v -> showSettings());
         setPage(page);
+        startHomeBatchWatch();
     }
 
     private void showFindPage() {
@@ -382,10 +410,324 @@ public class MainActivity extends AppCompatActivity {
         }
         resultCard.addView(qrView, new LinearLayout.LayoutParams(dp(390), dp(390)));
 
+        addButton(page, "이 사진으로 수납 시작", true, v -> startConfirmFromLatest());
         LinearLayout row = horizontal(page);
         addButton(row, K.LATEST_UPLOAD_BUTTON, false, v -> showLatestUpload());
-        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        addButton(row, K.HOME_BUTTON, false, v -> showHome());
         setPage(page);
+    }
+
+    // --- 수납 워크플로우: 확인 단계 → 넣기 단계 → 완료 ---
+
+    private void startConfirmFromLatest() {
+        confirmItems.clear();
+        try {
+            JSONObject latest = localDb.latestPhotoUpload();
+            if (latest.optBoolean("found", false)) {
+                JSONObject result = latest.optJSONObject("result");
+                JSONArray summary = result == null ? null : result.optJSONArray("summary");
+                if (summary != null) {
+                    for (int i = 0; i < summary.length(); i++) {
+                        JSONObject it = summary.optJSONObject(i);
+                        if (it == null) {
+                            continue;
+                        }
+                        String name = it.optString("item_name", it.optString("name", "")).trim();
+                        if (name.length() == 0) {
+                            continue;
+                        }
+                        confirmItems.add(new PendingItem(name, Math.max(1, it.optInt("quantity", 1)),
+                                it.optInt("drawer_number", 0), it.optInt("order", confirmItems.size() + 1)));
+                    }
+                    Collections.sort(confirmItems, (a, b) -> Integer.compare(a.order, b.order));
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        showConfirmStep();
+    }
+
+    private void showConfirmStep() {
+        currentPage = PAGE_CONFIRM;
+        LinearLayout page = basePage("수납 확인", true);
+
+        if (confirmItems.isEmpty()) {
+            LinearLayout empty = card(page);
+            empty.addView(text("인식된 물품이 없습니다. 아래에서 직접 추가하세요.", 26, "#657184", false));
+        }
+        for (int i = 0; i < confirmItems.size(); i++) {
+            final int index = i;
+            PendingItem it = confirmItems.get(i);
+            LinearLayout rowCard = card(page);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            TextView info = text((index + 1) + ". " + it.name + "  ·  " + it.drawer + "번 서랍  ·  " + it.quantity + "개", 28, "#17202A", true);
+            row.addView(info, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            Button del = new Button(this);
+            del.setText("삭제");
+            del.setAllCaps(false);
+            del.setTextSize(22);
+            del.setTextColor(Color.parseColor("#B42318"));
+            del.setBackground(bg("#FFFFFF", "#E5B7B0", 8));
+            del.setOnClickListener(v -> {
+                confirmItems.remove(index);
+                showConfirmStep();
+            });
+            row.addView(del, new LinearLayout.LayoutParams(dp(120), dp(64)));
+            rowCard.addView(row);
+        }
+
+        LinearLayout form = card(page);
+        form.addView(text("물품 추가", 24, "#657184", true));
+        EditText nameInput = input("물품명");
+        EditText drawerInput = input("서랍 번호");
+        EditText quantityInput = input("수량");
+        drawerInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        quantityInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        form.addView(nameInput, matchHeight(72, 12, 0));
+        LinearLayout addRow = compactRow(form);
+        addCompactInput(addRow, drawerInput);
+        addCompactInput(addRow, quantityInput);
+        addButton(form, "추가", false, v -> {
+            String name = nameInput.getText().toString().trim();
+            if (name.length() == 0) {
+                toast("물품명을 입력하세요.");
+                return;
+            }
+            int drawer = parseIntOrDefault(drawerInput.getText().toString(), 0);
+            int quantity = Math.max(1, parseIntOrDefault(quantityInput.getText().toString(), 1));
+            confirmItems.add(new PendingItem(name, quantity, drawer, confirmItems.size() + 1));
+            showConfirmStep();
+        });
+
+        addButton(page, "수납 시작", true, v -> startPlacement());
+        setPage(page);
+    }
+
+    private void startPlacement() {
+        if (confirmItems.isEmpty()) {
+            toast("수납할 물품이 없습니다.");
+            return;
+        }
+        try {
+            JSONArray items = new JSONArray();
+            for (PendingItem it : confirmItems) {
+                items.put(new JSONObject()
+                        .put("item_name", it.name)
+                        .put("quantity", it.quantity)
+                        .put("drawer_number", it.drawer));
+            }
+            localDb.createPlacementBatch(items);
+            showPlacementStep();
+        } catch (Exception e) {
+            showSimpleError("수납 시작 실패", e.getMessage());
+        }
+    }
+
+    private void showPlacementStep() {
+        currentPage = PAGE_PLACEMENT;
+        try {
+            JSONObject batch = localDb.getActivePlacementBatch();
+            if (batch == null) {
+                showPlacementComplete();
+                return;
+            }
+            renderPlacement(batch);
+            startPlacementPolling();
+        } catch (Exception e) {
+            showSimpleError("수납 진행 오류", e.getMessage());
+        }
+    }
+
+    private void renderPlacement(JSONObject batch) {
+        currentPage = PAGE_PLACEMENT;
+        placementShownIndex = batch.optInt("current_index", -1);
+        LinearLayout page = basePage("물품 넣기", true);
+
+        JSONArray items = batch.optJSONArray("items");
+        int total = batch.optInt("total", items == null ? 0 : items.length());
+        int idx = batch.optInt("current_index", 0);
+        JSONObject current = batch.optJSONObject("current");
+
+        LinearLayout cur = card(page);
+        cur.addView(text("지금 넣을 물품", 24, "#657184", true));
+        if (current != null) {
+            cur.addView(text(current.optInt("drawer_number") + "번 서랍에 " + current.optString("item_name") + " 넣기", 36, "#17202A", true));
+            addInfoRow(cur, "수량", current.optInt("quantity", 1) + "개");
+        } else {
+            cur.addView(text("대기 중", 30, "#17202A", true));
+        }
+        addInfoRow(cur, "진행률", Math.min(idx, total) + " / " + total);
+        if ("fail".equals(batch.optString("last_result"))) {
+            cur.addView(text("검증 실패 - 다시 넣어주세요.", 24, "#B42318", true));
+        } else {
+            cur.addView(text("손 동작(잡음 → 펼침) + 무게 센서 확인을 기다리는 중...", 22, "#657184", false));
+        }
+
+        LinearLayout list = card(page);
+        list.addView(text("수납 순서", 24, "#657184", true));
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject it = items.optJSONObject(i);
+                if (it == null) {
+                    continue;
+                }
+                String st = it.optString("status");
+                String badge = "placed".equals(st) ? "완료" : "skipped".equals(st) ? "건너뜀" : (i == idx ? "진행 중" : "대기");
+                addInfoRow(list, it.optInt("seq") + ". " + it.optString("item_name") + " (" + it.optInt("drawer_number") + "번)", badge);
+            }
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "건너뛰기", false, v -> manualAdvance("skip"));
+        addButton(row, "완료 처리", true, v -> manualAdvance("success"));
+        addButton(page, "수납 중단", false, v -> {
+            try {
+                localDb.cancelActivePlacementBatch();
+            } catch (Exception ignored) {
+            }
+            stopPlacementPolling();
+            showHome();
+        });
+        setPage(page);
+    }
+
+    private void manualAdvance(String result) {
+        try {
+            JSONObject r = localDb.advancePlacement(result);
+            if (r.optBoolean("completed", false)) {
+                showPlacementComplete();
+            } else {
+                renderPlacement(r);
+            }
+        } catch (Exception e) {
+            toast(e.getMessage());
+        }
+    }
+
+    private void startPlacementPolling() {
+        stopPlacementPolling();
+        placementPoller = new Runnable() {
+            @Override
+            public void run() {
+                if (!PAGE_PLACEMENT.equals(currentPage)) {
+                    return;
+                }
+                try {
+                    JSONObject batch = localDb.getActivePlacementBatch();
+                    if (batch == null) {
+                        showPlacementComplete();
+                        return;
+                    }
+                    if (batch.optInt("current_index", -1) != placementShownIndex) {
+                        renderPlacement(batch);
+                    }
+                } catch (Exception ignored) {
+                }
+                placementHandler.postDelayed(this, 1500);
+            }
+        };
+        placementHandler.postDelayed(placementPoller, 1500);
+    }
+
+    private void stopPlacementPolling() {
+        if (placementPoller != null) {
+            placementHandler.removeCallbacks(placementPoller);
+            placementPoller = null;
+        }
+    }
+
+    // 홈에서 대기 중, 휴대폰이 보낸 수납 리스트(활성 배치)가 생기면 자동으로 넣기 화면으로 진입
+    private void startHomeBatchWatch() {
+        stopHomeBatchWatch();
+        homeBatchWatcher = new Runnable() {
+            @Override
+            public void run() {
+                if (!PAGE_HOME.equals(currentPage)) {
+                    return;
+                }
+                try {
+                    JSONObject batch = localDb.getActivePlacementBatch();
+                    if (batch != null) {
+                        stopHomeBatchWatch();
+                        showPlacementStep();
+                        return;
+                    }
+                } catch (Exception ignored) {
+                }
+                placementHandler.postDelayed(this, 2000);
+            }
+        };
+        placementHandler.postDelayed(homeBatchWatcher, 2000);
+    }
+
+    private void stopHomeBatchWatch() {
+        if (homeBatchWatcher != null) {
+            placementHandler.removeCallbacks(homeBatchWatcher);
+            homeBatchWatcher = null;
+        }
+    }
+
+    private void showPlacementComplete() {
+        stopPlacementPolling();
+        currentPage = PAGE_COMPLETE;
+        LinearLayout page = basePage("수납 완료", false);
+        LinearLayout resultCard = card(page);
+        resultCard.addView(text("모든 물품을 DB에 저장했습니다.", 32, "#17202A", true));
+        addButton(page, "홈으로", true, v -> showHome());
+        setPage(page);
+    }
+
+    private int parseIntOrDefault(String value, int fallback) {
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    // --- 설정: Temi에서 직접 Gemini API 키 입력 ---
+
+    private void showSettings() {
+        currentPage = PAGE_SETTINGS;
+        LinearLayout page = basePage("설정", true);
+
+        LinearLayout settingsCard = card(page);
+        settingsCard.addView(text("Gemini API 키", 26, "#657184", true));
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String currentKey = prefs.getString(PREF_API_KEY, "").trim();
+        settingsCard.addView(text(
+                currentKey.length() == 0 ? "현재 상태: 설정 안 됨 (사진 자동 분석 비활성)" : "현재 상태: 설정됨 (" + maskKey(currentKey) + ")",
+                24, currentKey.length() == 0 ? "#B42318" : "#0F7A3B", true));
+
+        EditText keyInput = input("AIza... 형식의 키 입력");
+        keyInput.setText(currentKey);
+        settingsCard.addView(keyInput, matchHeight(76, 18, 6));
+        settingsCard.addView(text("키를 저장하면 사진 업로드 시 물품/서랍/순서가 자동 인식됩니다.", 22, "#657184", false));
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "키 지우기", false, v -> {
+            prefs.edit().remove(PREF_API_KEY).apply();
+            toast("Gemini 키를 삭제했습니다.");
+            showSettings();
+        });
+        addButton(row, "저장", true, v -> {
+            String key = keyInput.getText().toString().trim();
+            prefs.edit().putString(PREF_API_KEY, key).apply();
+            toast(key.length() == 0 ? "키를 비웠습니다." : "Gemini 키를 저장했습니다.");
+            showSettings();
+        });
+        addButton(page, K.HOME_BUTTON, false, v -> showHome());
+        setPage(page);
+    }
+
+    private String maskKey(String key) {
+        if (key.length() <= 6) {
+            return "******";
+        }
+        return key.substring(0, 4) + "****" + key.substring(key.length() - 2);
     }
 
     private void showLatestUpload() {
@@ -711,6 +1053,20 @@ public class MainActivity extends AppCompatActivity {
             this.location = location;
             this.drawerNumber = drawerNumber;
             this.quantity = quantity;
+        }
+    }
+
+    private static class PendingItem {
+        String name;
+        int quantity;
+        int drawer;
+        int order;
+
+        PendingItem(String name, int quantity, int drawer, int order) {
+            this.name = name;
+            this.quantity = quantity;
+            this.drawer = drawer;
+            this.order = order;
         }
     }
 

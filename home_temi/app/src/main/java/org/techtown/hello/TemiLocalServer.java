@@ -111,11 +111,36 @@ public class TemiLocalServer {
                 writeJson(socket, 200, session == null ? new JSONObject().put("active", false) : session.put("active", true));
             } else if ("POST".equals(request.method) && "/api/sensor-events".equals(path)) {
                 JSONObject body = new JSONObject(request.bodyAsString());
-                Double value = body.has("value") ? body.optDouble("value") : null;
-                writeJson(socket, 201, db.recordSensorEvent(
-                        body.optInt("drawer_number"),
-                        body.optString("event_type", body.optString("type")),
-                        value));
+                String type = body.optString("event_type", body.optString("type")).trim();
+                String upperType = type.toUpperCase();
+                if (upperType.contains("VERIFY_SUCCESS") || "success".equalsIgnoreCase(type)) {
+                    // Uno Q: 카메라 YOLO + 로드셀 둘 다 만족 → 현재 물품 완료, 다음으로 진행
+                    writeJson(socket, 200, db.advancePlacement("success"));
+                } else if (upperType.contains("VERIFY_FAIL") || "fail".equalsIgnoreCase(type)) {
+                    writeJson(socket, 200, db.advancePlacement("fail"));
+                } else {
+                    Double value = body.has("value") ? body.optDouble("value") : null;
+                    writeJson(socket, 201, db.recordSensorEvent(body.optInt("drawer_number"), type, value));
+                }
+            } else if ("POST".equals(request.method) && "/api/placement-batches".equals(path)) {
+                JSONObject body = new JSONObject(request.bodyAsString());
+                JSONArray items = body.optJSONArray("items");
+                writeJson(socket, 201, db.createPlacementBatch(items == null ? new JSONArray() : items));
+            } else if ("GET".equals(request.method) && "/api/placement-batches/current".equals(path)) {
+                JSONObject batch = db.getActivePlacementBatch();
+                writeJson(socket, 200, batch == null ? new JSONObject().put("active", false) : batch.put("active", true));
+            } else if ("POST".equals(request.method) && "/api/placement-batches/advance".equals(path)) {
+                JSONObject body = new JSONObject(request.bodyAsString());
+                writeJson(socket, 200, db.advancePlacement(body.optString("result", "success")));
+            } else if ("POST".equals(request.method) && "/api/settings/gemini-key".equals(path)) {
+                JSONObject body = new JSONObject(request.bodyAsString());
+                String key = body.optString("gemini_api_key", body.optString("key", "")).trim();
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit().putString(PREF_API_KEY, key).apply();
+                writeJson(socket, 200, new JSONObject().put("saved", true).put("has_key", key.length() > 0));
+            } else if ("GET".equals(request.method) && "/api/settings/gemini-key".equals(path)) {
+                String key = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(PREF_API_KEY, "").trim();
+                writeJson(socket, 200, new JSONObject().put("has_key", key.length() > 0));
             } else if ("GET".equals(request.method) && "/api/photos/latest".equals(path)) {
                 writeJson(socket, 200, db.latestPhotoUpload());
             } else if ("POST".equals(request.method) && ("/upload".equals(path) || "/api/photos/analyze".equals(path))) {
@@ -182,7 +207,7 @@ public class TemiLocalServer {
         String status;
         try {
             analysis = analyzer.analyze(image.bytes, image.mimeType);
-            saveDetectedItems(analysis);
+            // 물품은 '넣기 완료' 단계에서만 최종 DB에 저장한다. 여기서는 분석 결과만 기록.
             status = analysis.optString("status", "analyzed");
         } catch (Exception e) {
             analysis = new JSONObject().put("status", "uploaded").put("warning", e.getMessage()).put("summary", new JSONArray());
@@ -200,24 +225,6 @@ public class TemiLocalServer {
             writeHtml(socket, resultPage(response));
         } else {
             writeJson(socket, 201, response);
-        }
-    }
-
-    private void saveDetectedItems(JSONObject analysis) throws Exception {
-        JSONArray summary = analysis.optJSONArray("summary");
-        if (summary == null) {
-            return;
-        }
-        for (int i = 0; i < summary.length(); i++) {
-            JSONObject item = summary.optJSONObject(i);
-            if (item == null) {
-                continue;
-            }
-            String name = item.optString("item_name", item.optString("name", "")).trim();
-            if (name.length() == 0) {
-                continue;
-            }
-            db.savePlacement(name, 0, Math.max(1, item.optInt("quantity", 1)), "photo");
         }
     }
 
@@ -314,17 +321,75 @@ public class TemiLocalServer {
                 "<title>Temi Upload</title><style>body{font-family:sans-serif;padding:24px;background:#f5f7fa;color:#17202a}" +
                 "form{display:grid;gap:16px;max-width:420px}button,input{font-size:18px;padding:14px}" +
                 "button{background:#1e40af;color:white;border:0;border-radius:8px}</style></head><body>" +
-                "<h1>Temi 사진 업로드</h1><form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">" +
-                "<input type=\"password\" name=\"gemini_api_key\" placeholder=\"Gemini API key (선택)\">" +
+                "<h1>Temi 사진 업로드</h1>" +
+                "<p>수납할 물건 사진을 선택해 올리면 Temi가 자동으로 분석합니다.</p>" +
+                "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">" +
                 "<input type=\"file\" name=\"image\" accept=\"image/*\" required>" +
                 "<button type=\"submit\">업로드</button></form></body></html>";
     }
 
     private String resultPage(JSONObject response) {
-        return "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
-                "<title>Temi Upload Done</title><style>body{font-family:sans-serif;padding:24px;background:#f5f7fa;color:#17202a}" +
-                "pre{white-space:pre-wrap;background:white;padding:16px;border-radius:8px}</style></head><body>" +
-                "<h1>업로드 완료</h1><pre>" + escapeHtml(response.toString()) + "</pre><a href=\"/upload\">다시 업로드</a></body></html>";
+        JSONArray summary = response.optJSONArray("summary");
+        JSONArray itemsJs = new JSONArray();
+        if (summary != null) {
+            for (int i = 0; i < summary.length(); i++) {
+                JSONObject item = summary.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                String name = item.optString("item_name", item.optString("name", "")).trim();
+                if (name.length() == 0) {
+                    continue;
+                }
+                try {
+                    itemsJs.put(new JSONObject()
+                            .put("item_name", name)
+                            .put("quantity", Math.max(1, item.optInt("quantity", 1)))
+                            .put("drawer_number", item.optInt("drawer_number", 0)));
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        String dataJson = itemsJs.toString();
+
+        String css = "body{font-family:sans-serif;padding:20px;background:#f5f7fa;color:#17202a;max-width:520px;margin:0 auto}"
+                + "h1{font-size:22px}.card{background:#fff;border-radius:10px;margin:10px 0;overflow:hidden;border:1px solid #e3e8f0;transition:all .15s}"
+                + ".head{padding:16px;font-size:17px;cursor:pointer}.card.open{box-shadow:0 6px 20px rgba(30,64,175,.18)}"
+                + ".card.open .head{font-size:21px;font-weight:bold;background:#eef2ff}"
+                + ".body{padding:0 16px 16px}.body label{display:block;font-size:13px;color:#657184;margin:12px 0 4px}"
+                + ".body input{width:100%;box-sizing:border-box;font-size:18px;padding:11px;border:1px solid #d7dee8;border-radius:8px}"
+                + ".del{margin-top:14px;background:#fff;color:#b42318;border:1px solid #e5b7b0;border-radius:8px;padding:10px 14px;font-size:16px}"
+                + "button.main{width:100%;font-size:18px;padding:14px;border:0;border-radius:8px;color:#fff;margin-top:8px}"
+                + "#add{background:#475569}#start{background:#1e40af}#msg{margin-top:14px;font-size:16px;color:#0f7a3b;text-align:center}";
+
+        String js = "var items=" + dataJson + ";var open=-1;var listEl=document.getElementById('list');"
+                + "function field(l,v,t,cb){var w=document.createElement('label');w.textContent=l;var i=document.createElement('input');i.type=t;i.value=v;i.oninput=function(){cb(i.value);};i.onclick=function(e){e.stopPropagation();};w.appendChild(i);return w;}"
+                + "function render(){listEl.innerHTML='';items.forEach(function(it,idx){var c=document.createElement('div');c.className='card'+(idx===open?' open':'');"
+                + "var h=document.createElement('div');h.className='head';h.textContent=(idx+1)+'. '+(it.item_name||'(이름 없음)')+'  ·  '+it.drawer_number+'번 서랍  ·  '+it.quantity+'개';"
+                + "h.onclick=function(e){e.stopPropagation();open=(open===idx?-1:idx);render();};c.appendChild(h);"
+                + "if(idx===open){var b=document.createElement('div');b.className='body';b.onclick=function(e){e.stopPropagation();};"
+                + "b.appendChild(field('물품명',it.item_name,'text',function(v){it.item_name=v;}));"
+                + "b.appendChild(field('서랍 번호',it.drawer_number,'number',function(v){it.drawer_number=parseInt(v)||0;}));"
+                + "b.appendChild(field('수량',it.quantity,'number',function(v){it.quantity=parseInt(v)||1;}));"
+                + "var d=document.createElement('button');d.className='del';d.textContent='이 항목 삭제';d.onclick=function(e){e.stopPropagation();items.splice(idx,1);open=-1;render();};b.appendChild(d);c.appendChild(b);}"
+                + "listEl.appendChild(c);});}"
+                + "document.body.onclick=function(){if(open!==-1){open=-1;render();}};"
+                + "document.getElementById('add').onclick=function(e){e.stopPropagation();items.push({item_name:'',quantity:1,drawer_number:0});open=items.length-1;render();};"
+                + "document.getElementById('start').onclick=function(e){e.stopPropagation();if(items.length===0){document.getElementById('msg').textContent='물품을 추가하세요.';return;}fetch('/api/placement-batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:items})}).then(function(r){return r.json();}).then(function(){document.getElementById('msg').textContent='Temi로 전송했습니다. Temi 화면에서 수납이 시작됩니다.';}).catch(function(){document.getElementById('msg').textContent='전송 실패 - WiFi를 확인하세요.';});};"
+                + "render();";
+
+        String intro = itemsJs.length() > 0
+                ? "<p>인식된 물품입니다. 항목을 <b>누르면 커지고</b> 수정할 수 있어요. 다른 곳을 누르면 접힙니다.</p>"
+                : "<p>물품을 자동 인식하지 못했어요. 아래 <b>+ 물품 추가</b>로 직접 넣어 보세요.</p>";
+
+        return "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<title>수납 리스트 수정</title><style>" + css + "</style></head><body>"
+                + "<h1>인식 결과 · 수정</h1>" + intro
+                + "<div id='list'></div>"
+                + "<button class='main' id='add'>+ 물품 추가</button>"
+                + "<button class='main' id='start'>Temi로 전송 · 수납 시작</button>"
+                + "<div id='msg'></div>"
+                + "<script>" + js + "</script></body></html>";
     }
 
     private void writeHtml(Socket socket, String html) throws Exception {

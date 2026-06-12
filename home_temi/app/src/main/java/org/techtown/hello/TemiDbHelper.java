@@ -11,7 +11,7 @@ import org.json.JSONObject;
 
 public class TemiDbHelper extends SQLiteOpenHelper {
     private static final String DB_NAME = "temi_local.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
 
     public TemiDbHelper(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -49,10 +49,27 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 "status TEXT NOT NULL," +
                 "result_json TEXT," +
                 "created_at INTEGER NOT NULL)");
+        db.execSQL("CREATE TABLE placement_batches (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "status TEXT NOT NULL DEFAULT 'active'," +
+                "current_index INTEGER NOT NULL DEFAULT 0," +
+                "created_at INTEGER NOT NULL," +
+                "completed_at INTEGER)");
+        db.execSQL("CREATE TABLE placement_items (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "batch_id INTEGER NOT NULL," +
+                "seq INTEGER NOT NULL," +
+                "item_name TEXT NOT NULL," +
+                "quantity INTEGER NOT NULL DEFAULT 1," +
+                "drawer_number INTEGER NOT NULL DEFAULT 0," +
+                "status TEXT NOT NULL DEFAULT 'pending'," +
+                "updated_at INTEGER NOT NULL)");
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        db.execSQL("DROP TABLE IF EXISTS placement_items");
+        db.execSQL("DROP TABLE IF EXISTS placement_batches");
         db.execSQL("DROP TABLE IF EXISTS photo_uploads");
         db.execSQL("DROP TABLE IF EXISTS drawer_events");
         db.execSQL("DROP TABLE IF EXISTS storage_sessions");
@@ -226,6 +243,139 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         } finally {
             cursor.close();
         }
+    }
+
+    // --- 다중 물품 수납 배치 (사진 → Gemini 순서 → 순차 수납) ---
+
+    public synchronized JSONObject createPlacementBatch(JSONArray items) throws JSONException {
+        long now = System.currentTimeMillis();
+        SQLiteDatabase db = getWritableDatabase();
+        db.execSQL("UPDATE placement_batches SET status = 'cancelled' WHERE status = 'active'");
+        db.execSQL("INSERT INTO placement_batches(status, current_index, created_at) VALUES('active', 0, ?)",
+                new Object[]{now});
+        long batchId = getLastInsertId(db);
+        int seq = 1;
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            String name = item.optString("item_name", item.optString("name", "")).trim();
+            if (name.length() == 0) {
+                continue;
+            }
+            db.execSQL(
+                    "INSERT INTO placement_items(batch_id, seq, item_name, quantity, drawer_number, status, updated_at) " +
+                            "VALUES(?, ?, ?, ?, ?, 'pending', ?)",
+                    new Object[]{batchId, seq, name, Math.max(1, item.optInt("quantity", 1)), item.optInt("drawer_number", 0), now});
+            seq++;
+        }
+        return getActivePlacementBatch();
+    }
+
+    public synchronized JSONObject getActivePlacementBatch() throws JSONException {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT id FROM placement_batches WHERE status = 'active' ORDER BY id DESC LIMIT 1", new String[]{});
+        try {
+            if (!cursor.moveToFirst()) {
+                return null;
+            }
+            return buildBatch(cursor.getInt(0));
+        } finally {
+            cursor.close();
+        }
+    }
+
+    private JSONObject buildBatch(int batchId) throws JSONException {
+        SQLiteDatabase db = getReadableDatabase();
+        JSONObject batch = new JSONObject();
+        Cursor bc = db.rawQuery("SELECT * FROM placement_batches WHERE id = ?", new String[]{String.valueOf(batchId)});
+        try {
+            if (!bc.moveToFirst()) {
+                return null;
+            }
+            batch.put("id", batchId);
+            batch.put("status", bc.getString(bc.getColumnIndexOrThrow("status")));
+            batch.put("current_index", bc.getInt(bc.getColumnIndexOrThrow("current_index")));
+        } finally {
+            bc.close();
+        }
+        JSONArray items = new JSONArray();
+        Cursor ic = db.rawQuery("SELECT * FROM placement_items WHERE batch_id = ? ORDER BY seq", new String[]{String.valueOf(batchId)});
+        try {
+            while (ic.moveToNext()) {
+                JSONObject item = new JSONObject();
+                item.put("id", ic.getInt(ic.getColumnIndexOrThrow("id")));
+                item.put("seq", ic.getInt(ic.getColumnIndexOrThrow("seq")));
+                item.put("item_name", ic.getString(ic.getColumnIndexOrThrow("item_name")));
+                item.put("quantity", ic.getInt(ic.getColumnIndexOrThrow("quantity")));
+                item.put("drawer_number", ic.getInt(ic.getColumnIndexOrThrow("drawer_number")));
+                item.put("status", ic.getString(ic.getColumnIndexOrThrow("status")));
+                items.put(item);
+            }
+        } finally {
+            ic.close();
+        }
+        batch.put("items", items);
+        batch.put("total", items.length());
+        int idx = batch.getInt("current_index");
+        batch.put("current", idx >= 0 && idx < items.length() ? items.getJSONObject(idx) : JSONObject.NULL);
+        return batch;
+    }
+
+    /**
+     * 현재 물품의 수납 결과를 반영하고 다음 물품으로 진행한다.
+     * result: "success"(=놓음, Uno Q VERIFY_SUCCESS / 수동 완료), "skip"(건너뛰기), "fail"(검증 실패, 현재 유지)
+     */
+    public synchronized JSONObject advancePlacement(String result) throws JSONException {
+        JSONObject batch = getActivePlacementBatch();
+        if (batch == null) {
+            return new JSONObject().put("active", false).put("message", "진행 중인 수납이 없습니다.");
+        }
+        int batchId = batch.getInt("id");
+        int idx = batch.getInt("current_index");
+        JSONArray items = batch.getJSONArray("items");
+        long now = System.currentTimeMillis();
+        SQLiteDatabase db = getWritableDatabase();
+
+        if ("fail".equals(result)) {
+            JSONObject retry = getActivePlacementBatch();
+            retry.put("last_result", "fail");
+            retry.put("message", "검증 실패 - 다시 넣어주세요.");
+            return retry;
+        }
+
+        if (idx >= 0 && idx < items.length()) {
+            JSONObject current = items.getJSONObject(idx);
+            String newStatus = "skip".equals(result) ? "skipped" : "placed";
+            db.execSQL("UPDATE placement_items SET status = ?, updated_at = ? WHERE id = ?",
+                    new Object[]{newStatus, now, current.getInt("id")});
+            if ("placed".equals(newStatus)) {
+                savePlacement(current.getString("item_name"), current.optInt("drawer_number"),
+                        current.optInt("quantity", 1), "placement");
+            }
+        }
+
+        int nextIdx = idx + 1;
+        db.execSQL("UPDATE placement_batches SET current_index = ? WHERE id = ?", new Object[]{nextIdx, batchId});
+        if (nextIdx >= items.length()) {
+            db.execSQL("UPDATE placement_batches SET status = 'completed', completed_at = ? WHERE id = ?",
+                    new Object[]{now, batchId});
+            JSONObject done = new JSONObject();
+            done.put("active", false);
+            done.put("completed", true);
+            done.put("message", "모든 물품 수납 완료");
+            done.put("batch", buildBatch(batchId));
+            return done;
+        }
+        JSONObject next = getActivePlacementBatch();
+        next.put("last_result", result);
+        return next;
+    }
+
+    public synchronized void cancelActivePlacementBatch() {
+        getWritableDatabase().execSQL("UPDATE placement_batches SET status = 'cancelled' WHERE status = 'active'");
     }
 
     private JSONObject itemFromCursor(Cursor cursor) throws JSONException {
