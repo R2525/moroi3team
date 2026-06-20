@@ -1,6 +1,7 @@
 package org.techtown.myapplication;
 
 import android.graphics.Color;
+import android.graphics.Bitmap;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
@@ -14,11 +15,21 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.common.BitMatrix;
+
+import com.robotemi.sdk.Robot;
+
+import android.speech.tts.TextToSpeech;
+import java.util.Locale;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -38,20 +49,59 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements Robot.AsrListener, Robot.WakeupWordListener {
 
     private static final int REQUEST_PICK_IMAGE = 1001;
-    private static final String DEFAULT_API_BASE_URL = "http://10.0.2.2:18000";
-    private static final String IP_CONFIG_FILE = "ip.json";
+    // --- Temi 내부 서버 주소 및 포트 자동바인딩 설정 ---
+    // 에뮬레이터(Temi_UI_API_29)가 자기 자신(localhost) 안에서 구동 중인 API/DB 서비스를 호출할 때 쓰는 루프백 주소.
+    // 안드로이드 에뮬레이터에서 10.0.2.2는 호스트 PC의 127.0.0.1로 매핑된다.
+    private static final String FINAL_TEMI_SERVER_URL = "http://10.0.2.2:8000";
+    private static final String DEFAULT_API_BASE_URL = FINAL_TEMI_SERVER_URL;
+    // 실제 Temi(물리 기기)에서 쓸 기본 서버 주소. 10.0.2.2는 에뮬레이터 전용이라 실기기에서는 동작하지 않으므로,
+    // API 서버(FastAPI/uvicorn)를 띄운 PC의 실제 공유기 LAN IP를 사용한다.
+    private static final String DEFAULT_REAL_DEVICE_API_BASE_URL = "http://172.17.65.144:8000";
+    // 외부 스마트폰 브라우저가 같은 공유기(Wi-Fi) 환경에서 QR을 찍고 들어와 사진을 입력할 "Temi 내부 DB 입력창" 주소.
+    // 에뮬레이터 루프백 주소(10.0.2.2)와는 분리된 값으로, 설정 화면에서 실제 Temi가 할당받은 로컬 IP로 바꿀 수 있다.
+    // 주의: 이 주소는 PC(API 서버)의 LAN IP여야 한다. Temi 본체의 IP를 넣으면 그 기기에는 서버가 없어 "사이트에 연결할 수 없음" 오류가 난다.
+    private static final String DEFAULT_TEMI_DB_INPUT_WEB_URL = "http://172.17.65.144:8000/api/drawers/link?device=temi";
     private static final String PREFS_NAME = "temi_settings";
     private static final String PREF_API_BASE_URL = "api_base_url";
+    private static final String PREF_TEMI_DB_INPUT_WEB_URL = "temi_db_input_web_url";
+
+    // QR 연동 검증을 위한 폴링 제어 변수
+    private final android.os.Handler linkPollingHandler = new android.os.Handler();
+    private Runnable linkPollerRunnable;
+    private boolean isPollingForLink = false;
+
+    // 아두이노 -> Temi 내부 FastAPI DB -> 앱으로 이어지는 수납 센서 데이터를 주기적으로 가져오기 위한 폴링 제어 변수
+    private static final long SENSOR_POLL_INTERVAL_MS = 3000;
+    private final android.os.Handler sensorPollingHandler = new android.os.Handler();
+    private Runnable sensorPollerRunnable;
+    private boolean isSensorPolling = false;
+    private int lastNotifiedDrawerNumber = -1;
+
+    // 앱 실행 즉시(onCreate) 미리 구워두는 "Temi DB 입력창" QR 비트맵 캐시.
+    // createQrCodeContainer()가 이 캐시를 먼저 확인하므로, 홈 화면 진입 시 Loading 없이 바로 렌더링된다.
+    private volatile Bitmap cachedTemiDbInputQrBitmap;
+    private volatile String cachedTemiDbInputQrUrl;
 
     private FrameLayout screenRoot;
     private Uri selectedImageUri;
     private final List<DetectedPhotoItem> detectedPhotoItems = new ArrayList<>();
     private String autoDrawerStatusText = "서랍 센서: 대기 중";
     private String apiBaseUrl = DEFAULT_API_BASE_URL;
+    private String temiDbInputWebUrl = DEFAULT_TEMI_DB_INPUT_WEB_URL;
+    private boolean isQrLinked = false;
+    private boolean isPhotoUploading = false;
+    private boolean isPhotoAnalyzing = false;
+    private boolean shouldStartPlacementAfterSave = false;
+    private int placementItemIndex = 0;
+    private boolean isStoreTemiGuidanceActive = false;
+    private int storeTemiGuidanceStep = 0;
+    private boolean isShoppingListReceived = false;
     private final List<String> shoppingUsers = new ArrayList<>(Arrays.asList("사용자 1", "사용자 2"));
     private final List<Integer> shoppingUserIds = new ArrayList<>(Arrays.asList(null, null));
     private final List<List<String>> cartItemsByUser = initialCartItems();
@@ -64,6 +114,17 @@ public class MainActivity extends Activity {
     private int selectedIntegratedListIndex = -1;
     private int nextShoppingUserNumber = 3;
     private Integer storeTemiStoreId = null;
+    private final List<StoreTransferItem> storeTransferItems = new ArrayList<>();
+
+    // 쇼핑리스트 음성 인터랙션(중복 구매 확인) 제어 변수
+    private TextToSpeech temiTts;
+    private boolean isTtsReady = false;
+    private boolean isAwaitingDuplicateConfirmation = false;
+    private String pendingDuplicateItemName;
+    private int pendingDuplicateItemCount;
+    private static final List<String> FORCE_ADD_VOICE_PHRASES = Arrays.asList(
+            "그래도 추가할래", "그래도추가할래", "그래도 추가해줘", "그래도 추가해 줘",
+            "추가해줘", "추가해 줘", "그래도 살래", "그래도 구매할래", "그래도 넣어줘", "그래도 넣어 줘");
 
     private static List<List<String>> initialCartItems() {
         List<List<String>> items = new ArrayList<>();
@@ -84,29 +145,253 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         screenRoot = findViewById(R.id.screenRoot);
+        
+        // 에뮬레이터에서는 10.0.2.2 루프백을 강제하고, 실제 Temi 기기에서는 저장된 LAN 주소(없으면 기본 LAN 주소)를 사용한다.
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String defaultApiBaseUrl = isRunningOnEmulator() ? FINAL_TEMI_SERVER_URL : DEFAULT_REAL_DEVICE_API_BASE_URL;
+        apiBaseUrl = isRunningOnEmulator() ? FINAL_TEMI_SERVER_URL : prefs.getString(PREF_API_BASE_URL, defaultApiBaseUrl);
+        temiDbInputWebUrl = prefs.getString(PREF_TEMI_DB_INPUT_WEB_URL, DEFAULT_TEMI_DB_INPUT_WEB_URL);
+        prefs.edit()
+                .putString(PREF_API_BASE_URL, apiBaseUrl)
+                .putString(PREF_TEMI_DB_INPUT_WEB_URL, temiDbInputWebUrl)
+                .apply();
 
-        String persistedApiBaseUrl = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getString(PREF_API_BASE_URL, null);
-        String assetApiBaseUrl = loadApiBaseUrlFromAssets();
+        // 서버 연결 상태 자동 체크 (Health Check)
+        checkServerHealth();
 
-        if (assetApiBaseUrl != null && assetApiBaseUrl.length() > 0) {
-            apiBaseUrl = assetApiBaseUrl;
-        } else if (persistedApiBaseUrl != null && persistedApiBaseUrl.length() > 0) {
-            apiBaseUrl = persistedApiBaseUrl;
-        } else {
-            apiBaseUrl = DEFAULT_API_BASE_URL;
+        // 앱이 켜지자마자 Temi DB 입력창 QR을 미리 구워서 캐싱 (홈 화면 진입 시 Loading 없이 즉시 표시)
+        prewarmTemiDbInputQrCode();
+
+        // 아두이노가 Temi 내부 DB 서버에 적재한 수납 센서 데이터를 앱이 주기적으로 가져오도록 폴링 시작
+        startSensorPolling();
+
+        // "Temi야~ 칫솔 4개 사야해" 같은 음성 명령으로 쇼핑 리스트에 자동 등록하기 위해 Temi 음성 리스너 등록
+        if (!isRunningOnEmulator()) {
+            Robot.getInstance().addAsrListener(this);
+            Robot.getInstance().addWakeupWordListener(this);
         }
 
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .edit()
-                .putString(PREF_API_BASE_URL, apiBaseUrl)
-                .apply();
+        // 중복 구매 안내("이미 구매된 물건입니다")를 음성으로 출력하기 위한 안드로이드 TTS 초기화
+        temiTts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+            @Override
+            public void onInit(int status) {
+                if (status == TextToSpeech.SUCCESS && temiTts != null) {
+                    temiTts.setLanguage(Locale.KOREAN);
+                    isTtsReady = true;
+                }
+            }
+        });
 
         showHome();
     }
 
+    private boolean isRunningOnEmulator() {
+        String fingerprint = android.os.Build.FINGERPRINT;
+        String hardware = android.os.Build.HARDWARE;
+        String model = android.os.Build.MODEL;
+        return fingerprint.startsWith("generic")
+                || fingerprint.startsWith("unknown")
+                || hardware.contains("goldfish")
+                || hardware.contains("ranchu")
+                || model.contains("Emulator")
+                || model.contains("Android SDK built for");
+    }
+
+    private void prewarmTemiDbInputQrCode() {
+        final String linkUrl = temiDbInputWebUrl;
+        final int size = dp(260);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                Bitmap qrBitmap = createQrBitmap(linkUrl, size);
+                if (qrBitmap != null) {
+                    cachedTemiDbInputQrBitmap = qrBitmap;
+                    cachedTemiDbInputQrUrl = linkUrl;
+                }
+            }
+        }).start();
+    }
+
+    private void checkServerHealth() {
+        requestJson("GET", "/api/health", null, new ApiCallback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                if (response != null && "ok".equals(response.optString("status"))) {
+                    Log.d("TemiApi", "Temi 서버 연결 성공");
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this, "Temi 서버 연결 성공 (Health Check OK)", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+
+            @Override
+            public void onFailure(String message) {
+                Log.e("TemiApi", "Temi 서버 연결 실패: " + message);
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        stopLinkPolling();
+        stopSensorPolling();
+        if (!isRunningOnEmulator()) {
+            Robot.getInstance().removeAsrListener(this);
+            Robot.getInstance().removeWakeupWordListener(this);
+        }
+        if (temiTts != null) {
+            temiTts.stop();
+            temiTts.shutdown();
+            temiTts = null;
+        }
+        super.onDestroy();
+    }
+
+    // Temi가 한국어 문장을 음성으로 출력한다 (TTS 미준비 상태면 조용히 무시).
+    private void speak(String text) {
+        if (temiTts != null && isTtsReady && text != null && text.length() > 0) {
+            temiTts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "temi_tts_" + text.hashCode());
+        }
+    }
+
+    // 사용자가 "Temi야~"라고 부르면 호출됨 (호출 자체는 Toast로만 알리고, 실제 명령 처리는 onAsrResult에서 처리)
+    @Override
+    public void onWakeupWord(String wakeupWord, int direction) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(MainActivity.this, "듣고 있어요...", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    // 웨이크워드 이후 실제로 말한 문장이 인식되면 호출됨.
+    // 중복 구매 확인 응답을 기다리는 중이면 그 답변으로 처리하고, 그렇지 않으면 "물품명 N개" 패턴의 쇼핑 등록 명령으로 처리한다.
+    @Override
+    public void onAsrResult(final String asrResult) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isAwaitingDuplicateConfirmation) {
+                    handleDuplicateConfirmationAnswer(asrResult);
+                } else {
+                    handleVoiceShoppingRequest(asrResult);
+                }
+            }
+        });
+    }
+
+    // "이미 구매된 물건입니다" 음성 안내 직후의 사용자 답변을 처리한다.
+    // "그래도 추가할래" / "추가해 줘" 류의 발화면 강제로 쇼핑리스트에 INSERT하고, 그 외(취소 등)면 저장을 취소한다.
+    private void handleDuplicateConfirmationAnswer(String asrResult) {
+        if (!isAwaitingDuplicateConfirmation) {
+            return;
+        }
+        isAwaitingDuplicateConfirmation = false;
+
+        String normalizedAnswer = asrResult == null ? "" : asrResult.trim().replace(" ", "");
+        boolean forceAdd = false;
+        for (String phrase : FORCE_ADD_VOICE_PHRASES) {
+            if (normalizedAnswer.contains(phrase.replace(" ", ""))) {
+                forceAdd = true;
+                break;
+            }
+        }
+
+        String itemName = pendingDuplicateItemName;
+        int itemCount = pendingDuplicateItemCount;
+        pendingDuplicateItemName = null;
+        pendingDuplicateItemCount = 0;
+
+        if (forceAdd && itemName != null) {
+            Toast.makeText(this, "음성 확인: \"" + asrResult + "\" → 그대로 추가합니다.", Toast.LENGTH_SHORT).show();
+            addShoppingItemToServer(itemName, itemCount);
+        } else {
+            speak("추가를 취소했습니다");
+            Toast.makeText(this, "추가를 취소했습니다: \"" + asrResult + "\"", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static final Pattern VOICE_SHOPPING_ITEM_PATTERN =
+            Pattern.compile("([가-힣A-Za-z0-9]+)\\s*(\\d+)\\s*개");
+
+    // "칫솔 4개 사야해", "물 2개 사줘" 같은 자유 발화에서 (물품명, 개수)를 뽑아 쇼핑 리스트 서버에 추가한다.
+    private void handleVoiceShoppingRequest(String asrResult) {
+        if (asrResult == null) {
+            return;
+        }
+        String text = asrResult.trim();
+        if (text.isEmpty()) {
+            return;
+        }
+
+        Matcher matcher = VOICE_SHOPPING_ITEM_PATTERN.matcher(text);
+        if (!matcher.find()) {
+            Toast.makeText(this, "음성에서 물품/개수를 인식하지 못했습니다: \"" + text + "\"", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        String itemName = matcher.group(1).trim();
+        int quantity;
+        try {
+            quantity = Integer.parseInt(matcher.group(2));
+        } catch (NumberFormatException error) {
+            quantity = 1;
+        }
+        if (quantity <= 0) {
+            quantity = 1;
+        }
+
+        Toast.makeText(this, "음성 인식: \"" + text + "\" → " + itemName + " " + quantity + "개 추가 중...", Toast.LENGTH_SHORT).show();
+        addShoppingItemToServer(itemName, quantity);
+    }
+
+    private void startSensorPolling() {
+        if (isSensorPolling) return;
+        isSensorPolling = true;
+        sensorPollerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isSensorPolling) return;
+                fetchLatestDrawerNumber(new DrawerNumberCallback() {
+                    @Override
+                    public void onSuccess(int drawerNumber) {
+                        String updatedStatusText = "서랍 센서: " + drawerNumber + "번 서랍 감지";
+                        if (drawerNumber != lastNotifiedDrawerNumber) {
+                            lastNotifiedDrawerNumber = drawerNumber;
+                            Log.d("TemiApi", "아두이노 -> Temi DB 갱신 감지: " + updatedStatusText);
+                        }
+                        autoDrawerStatusText = updatedStatusText;
+                        if (isSensorPolling) {
+                            sensorPollingHandler.postDelayed(sensorPollerRunnable, SENSOR_POLL_INTERVAL_MS);
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(String message) {
+                        Log.e("TemiApi", "아두이노 센서 데이터 폴링 실패: " + message);
+                        if (isSensorPolling) {
+                            sensorPollingHandler.postDelayed(sensorPollerRunnable, SENSOR_POLL_INTERVAL_MS);
+                        }
+                    }
+                });
+            }
+        };
+        sensorPollingHandler.post(sensorPollerRunnable);
+    }
+
+    private void stopSensorPolling() {
+        isSensorPolling = false;
+        if (sensorPollerRunnable != null) {
+            sensorPollingHandler.removeCallbacks(sensorPollerRunnable);
+            sensorPollerRunnable = null;
+        }
+    }
+
     private void showHome() {
-        LinearLayout page = page("TEMI Shopping", "수납, 쇼핑리스트, DB 조회, Temi 연결을 한 곳에서 관리합니다.");
+        LinearLayout page = page("가정 Temi", "수납, 쇼핑리스트, DB 조회, Temi 연결을 한 곳에서 관리합니다.");
 
         LinearLayout status = card();
         status.addView(label("연결 상태"));
@@ -115,7 +400,7 @@ public class MainActivity extends Activity {
         status.addView(body("서랍: 1개 연결 대기"));
         page.addView(status);
 
-        page.addView(navButton("수납추가", "카메라로 물품을 확인하고 서랍 수납을 진행합니다.", new View.OnClickListener() {
+        page.addView(navButton("서랍관리", "QR 연동, 카메라 촬영, 수동 추가로 서랍 수납을 관리합니다.", new View.OnClickListener() {
             @Override public void onClick(View v) { showCamera(); }
         }));
         page.addView(navButton("쇼핑리스트", "여러 사용자의 구매 요청을 합치고 저장합니다.", new View.OnClickListener() {
@@ -132,84 +417,280 @@ public class MainActivity extends Activity {
     }
 
     private void showCamera() {
-        LinearLayout page = page("카메라촬영", "수납할 물품을 촬영하거나 갤러리에서 선택합니다.");
-        page.addView(backButton());
+        // QR 연동, 사진 분석, 수동 입력을 한 화면에 모두 보여준다 (단계 구분 없음).
+        LinearLayout page = page("서랍관리", "QR 연동, 사진 분석, 수동 입력으로 서랍 수납을 관리합니다.");
+        page.addView(backTo("홈으로 돌아가기", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                stopLinkPolling();
+                showHome();
+            }
+        }));
 
-        TextView camera = new TextView(this);
-        if (selectedImageUri == null) {
-            camera.setText("카메라 미리보기\n\n가이드 프레임 안에 물품을 놓아주세요");
-        } else {
-            camera.setText("갤러리 이미지 선택됨\n\n" + selectedImageUri);
+        LinearLayout qrCard = card();
+        qrCard.addView(label("Temi QR 스캔"));
+        qrCard.addView(body(isQrLinked
+                ? "서랍 연동이 완료되었습니다. 스마트폰으로 계속 사진을 보내 등록할 수 있습니다."
+                : "스마트폰으로 아래 QR 코드를 찍어서 Temi 내부 서버에 접속하면 연동이 자동으로 완료됩니다."));
+        page.addView(qrCard);
+        // 외부 스마트폰이 스캔할 주소이므로 에뮬레이터 루프백(apiBaseUrl)이 아닌 temiDbInputWebUrl을 사용한다.
+        page.addView(createQrCodeContainer("서랍 연동", temiDbInputWebUrl));
+        startLinkPolling();
+
+        LinearLayout statusCard = card();
+        statusCard.addView(label("사진으로 등록"));
+        statusCard.addView(body(selectedImageUri == null ? "이미지 선택 대기 중" : "선택된 이미지: " + selectedImageUri));
+
+        String uploadText = "사진 업로드 상태: ";
+        if (isPhotoUploading) uploadText += "업로드 중...";
+        else if (selectedImageUri != null) uploadText += "업로드 완료";
+        else uploadText += "대기 중";
+        statusCard.addView(body(uploadText));
+
+        String analysisText = "분석 상태: ";
+        if (isPhotoAnalyzing) analysisText += "분석 중...";
+        else if (selectedImageUri != null) analysisText += "분석 대기 중";
+        else analysisText += "분석 준비";
+        statusCard.addView(body(analysisText));
+
+        if (isPhotoUploading || isPhotoAnalyzing) {
+            ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleLarge);
+            statusCard.addView(progressBar, params(-2, -2, 0, 12, 0, 12));
         }
-        camera.setGravity(Gravity.CENTER);
-        camera.setTextColor(Color.WHITE);
-        camera.setTextSize(18);
-        camera.setBackgroundResource(R.drawable.temi_camera_panel);
-        page.addView(camera, params(-1, dp(260), 0, 8, 0, 16));
+        page.addView(statusCard);
 
         LinearLayout actions = row();
-        actions.addView(button("촬영", true, null), weightParams());
-        actions.addView(button("갤러리", false, new View.OnClickListener() {
+        actions.addView(button("갤러리 선택", true, (isPhotoUploading || isPhotoAnalyzing) ? null : new View.OnClickListener() {
             @Override public void onClick(View v) { openGallery(); }
+        }), weightParams());
+
+        actions.addView(button("분석 요청", false, (isPhotoUploading || isPhotoAnalyzing) ? null : new View.OnClickListener() {
+            @Override public void onClick(View v) { analyzeSelectedPhoto(); }
         }), weightParams());
         page.addView(actions);
 
-        LinearLayout drawerSetup = card();
-        drawerSetup.addView(label("자동 서랍 감지"));
-        drawerSetup.addView(body("서랍 위 센서가 서버에 올린 최신 서랍 번호를 저장 시 자동으로 사용합니다."));
-        drawerSetup.addView(body(autoDrawerStatusText));
-        drawerSetup.addView(button("서랍 센서 정보 새로고침", false, new View.OnClickListener() {
-            @Override public void onClick(View v) { refreshAutoDrawerStatus(); }
-        }));
-        page.addView(drawerSetup);
-
-        page.addView(button("분석", true, new View.OnClickListener() {
-            @Override public void onClick(View v) { analyzeSelectedPhoto(); }
-        }));
-
-        LinearLayout form = card();
-        form.addView(label("수동 DB 서버 저장"));
-        final EditText itemNameInput = input("물품명입력");
-        final EditText quantityInput = input("개수입력");
-        quantityInput.setInputType(InputType.TYPE_CLASS_NUMBER);
         if (!detectedPhotoItems.isEmpty()) {
-            itemNameInput.setText(detectedPhotoItems.get(0).name);
-            quantityInput.setText(String.valueOf(detectedPhotoItems.get(0).quantity));
-        }
-        form.addView(itemNameInput);
-        form.addView(quantityInput);
-        form.addView(button("DB 서버에 저장", true, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                saveDbItemWithAutoDrawer(itemNameInput, quantityInput, new Runnable() {
-                    @Override public void run() {
-                        showCamera();
-                    }
-                });
-            }
-        }));
-        page.addView(form);
-
-        LinearLayout note = card();
-        note.addView(label("Mock 분석 결과"));
-        note.addView(body("세제, 수건, 샴푸를 인식한 상황으로 다음 화면을 구성합니다."));
-        page.addView(note);
-
-        LinearLayout analysisResult = card();
-        analysisResult.addView(label("Gemini \uBD84\uC11D \uACB0\uACFC"));
-        if (detectedPhotoItems.isEmpty()) {
-            analysisResult.addView(body("\uC0AC\uC9C4\uC744 \uC120\uD0DD\uD55C \uB4A4 \uBD84\uC11D \uBC84\uD2BC\uC744 \uB20C\uB7EC\uC8FC\uC138\uC694."));
-        } else {
-            analysisResult.addView(body("물품명별로 DB에 자동 저장했습니다. 잘못 인식된 항목은 아래에서 수정 후 다시 저장할 수 있습니다."));
+            LinearLayout analysisResult = card();
+            analysisResult.addView(label("Gemini 분석 결과 - " + detectedPhotoItems.size() + "개"));
+            analysisResult.addView(body("검출된 물품과 수량을 확인하고 [물건 넣기 시작]을 누르세요."));
             for (int i = 0; i < detectedPhotoItems.size(); i++) {
                 analysisResult.addView(detectedPhotoItemEditor(detectedPhotoItems.get(i), i));
             }
+            analysisResult.addView(button("물건 넣기 시작", true, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    placementItemIndex = 0;
+                    shouldStartPlacementAfterSave = true;
+                    saveDetectedItemsWithAutoDrawer();
+                }
+            }));
+            page.addView(analysisResult);
         }
-        page.addView(analysisResult);
+
+        LinearLayout manualAddCard = card();
+        manualAddCard.addView(label("수동 추가"));
+        manualAddCard.addView(body("사진 없이 물품명과 서랍 번호를 직접 입력해 바로 저장합니다."));
+        final EditText manualItemNameInput = input("물품명입력");
+        final EditText manualQuantityInput = input("개수입력");
+        manualQuantityInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        final EditText manualDrawerNumberInput = input("서랍번호입력");
+        manualDrawerNumberInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        manualAddCard.addView(manualItemNameInput);
+        manualAddCard.addView(manualQuantityInput);
+        manualAddCard.addView(manualDrawerNumberInput);
+        manualAddCard.addView(button("직접 추가", false, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                saveDbItem(manualItemNameInput, manualQuantityInput, manualDrawerNumberInput, new Runnable() {
+                    @Override public void run() { showCamera(); }
+                });
+            }
+        }));
+        page.addView(manualAddCard);
 
         setScreen(page);
     }
 
-    private LinearLayout detectedPhotoItemEditor(DetectedPhotoItem item, final int index) {
+    private Bitmap createQrBitmap(String text, int size) {
+        try {
+            // 쇼핑리스트 QR에는 한글 물품명이 들어가므로, UTF-8로 인코딩해야 매장 Temi가 스캔했을 때 깨지지 않는다.
+            Map<com.google.zxing.EncodeHintType, Object> hints = new HashMap<>();
+            hints.put(com.google.zxing.EncodeHintType.CHARACTER_SET, "UTF-8");
+            BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints);
+            Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+            for (int x = 0; x < size; x++) {
+                for (int y = 0; y < size; y++) {
+                    bitmap.setPixel(x, y, matrix.get(x, y) ? Color.BLACK : Color.WHITE);
+                }
+            }
+            return bitmap;
+        } catch (Exception e) {
+            Log.e("QR_ERROR", "QR Code generation failed in createQrBitmap", e);
+            return null;
+        }
+    }
+
+    private void startLinkPolling() {
+        if (isPollingForLink) return;
+        isPollingForLink = true;
+        linkPollerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isPollingForLink) return;
+                checkDrawerLinkStatus(new ApiCallback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        boolean linked = response.optBoolean("linked", false);
+                        if (linked) {
+                            isQrLinked = true;
+                            stopLinkPolling();
+                            Toast.makeText(MainActivity.this, "서랍 연동이 완료되었습니다.", Toast.LENGTH_SHORT).show();
+                            showCamera();
+                        } else {
+                            if (isPollingForLink) {
+                                linkPollingHandler.postDelayed(linkPollerRunnable, 2000);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(String message) {
+                        if (isPollingForLink) {
+                            linkPollingHandler.postDelayed(linkPollerRunnable, 2000);
+                        }
+                    }
+                });
+            }
+        };
+        linkPollingHandler.post(linkPollerRunnable);
+    }
+
+    private void stopLinkPolling() {
+        isPollingForLink = false;
+        if (linkPollerRunnable != null) {
+            linkPollingHandler.removeCallbacks(linkPollerRunnable);
+            linkPollerRunnable = null;
+        }
+    }
+
+    private void checkDrawerLinkStatus(ApiCallback callback) {
+        requestJson("GET", "/api/drawers/link-status", null, callback);
+    }
+
+    private View createQrCodeContainer(final String title, final String linkUrl) {
+        final LinearLayout qrLayout = new LinearLayout(this);
+        qrLayout.setOrientation(LinearLayout.VERTICAL);
+        qrLayout.setGravity(Gravity.CENTER);
+        qrLayout.setPadding(dp(16), dp(16), dp(16), dp(16));
+        qrLayout.setBackgroundResource(R.drawable.temi_card);
+        qrLayout.setLayoutParams(params(-1, -2, 0, 0, 0, 16));
+
+        TextView titleLabel = new TextView(this);
+        titleLabel.setText(title);
+        titleLabel.setGravity(Gravity.CENTER);
+        titleLabel.setTextColor(getColorCompat(R.color.temi_text));
+        titleLabel.setTextSize(22);
+        titleLabel.setTypeface(null, 1);
+        qrLayout.addView(titleLabel, params(-1, -2, 0, 0, 0, 12));
+
+        // Loading container showing progress spinner and loading text
+        final LinearLayout loadingContainer = new LinearLayout(this);
+        loadingContainer.setOrientation(LinearLayout.VERTICAL);
+        loadingContainer.setGravity(Gravity.CENTER);
+        loadingContainer.setLayoutParams(new LinearLayout.LayoutParams(dp(260), dp(260)));
+
+        ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyle);
+        loadingContainer.addView(progressBar);
+
+        TextView loadingLabel = new TextView(this);
+        loadingLabel.setText("Loading...");
+        loadingLabel.setGravity(Gravity.CENTER);
+        loadingLabel.setTextColor(getColorCompat(R.color.temi_muted));
+        loadingLabel.setTextSize(16);
+        loadingLabel.setPadding(0, dp(8), 0, 0);
+        loadingContainer.addView(loadingLabel);
+
+        qrLayout.addView(loadingContainer);
+
+        // QR Image (initially GONE)
+        final ImageView qrImage = new ImageView(this);
+        qrImage.setBackgroundColor(Color.WHITE);
+        int padding = dp(12);
+        qrImage.setPadding(padding, padding, padding, padding);
+        qrImage.setVisibility(View.GONE);
+        LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(dp(260), dp(260));
+        imageParams.gravity = Gravity.CENTER;
+        qrLayout.addView(qrImage, imageParams);
+
+        // Helper label (initially GONE)
+        final TextView helperLabel = new TextView(this);
+        helperLabel.setText("스마트폰으로 QR 코드를 스캔하세요.\n연동 URL: " + linkUrl);
+        helperLabel.setGravity(Gravity.CENTER);
+        helperLabel.setTextColor(getColorCompat(R.color.temi_muted));
+        helperLabel.setTextSize(16);
+        helperLabel.setPadding(0, dp(12), 0, 0);
+        helperLabel.setVisibility(View.GONE);
+        qrLayout.addView(helperLabel);
+
+        // Error message label (initially GONE)
+        final TextView errorLabel = new TextView(this);
+        errorLabel.setGravity(Gravity.CENTER);
+        errorLabel.setTextColor(Color.RED);
+        errorLabel.setTextSize(18);
+        errorLabel.setTypeface(null, 1);
+        errorLabel.setPadding(dp(16), dp(16), dp(16), dp(16));
+        errorLabel.setVisibility(View.GONE);
+        qrLayout.addView(errorLabel);
+
+        // onCreate에서 미리 구워둔 캐시가 이 linkUrl과 일치하면 즉시 사용 (Loading 스킵)
+        if (linkUrl.equals(cachedTemiDbInputQrUrl) && cachedTemiDbInputQrBitmap != null) {
+            loadingContainer.setVisibility(View.GONE);
+            qrImage.setImageBitmap(cachedTemiDbInputQrBitmap);
+            qrImage.setVisibility(View.VISIBLE);
+            helperLabel.setVisibility(View.VISIBLE);
+            return qrLayout;
+        }
+
+        // Asynchronously generate QR bitmap to keep UI smooth and avoid ANRs
+        final int size = dp(260);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // linkUrl 주소를 기반으로 QR 비트맵 생성
+                    final Bitmap qrBitmap = createQrBitmap(linkUrl, size);
+                    if (qrBitmap != null) {
+                        if (linkUrl.equals(temiDbInputWebUrl)) {
+                            cachedTemiDbInputQrBitmap = qrBitmap;
+                            cachedTemiDbInputQrUrl = linkUrl;
+                        }
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                loadingContainer.setVisibility(View.GONE);
+                                qrImage.setImageBitmap(qrBitmap);
+                                qrImage.setVisibility(View.VISIBLE);
+                                helperLabel.setVisibility(View.VISIBLE);
+                            }
+                        });
+                    } else {
+                        throw new Exception("QR Code Bitmap is null");
+                    }
+                } catch (final Exception e) {
+                    Log.e("QR_ERROR", "Error generating QR Code", e);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            loadingContainer.setVisibility(View.GONE);
+                            errorLabel.setText("⚠️ QR 생성 실패!\n서버 주소가 올바르지 않거나 생성 중 오류가 발생했습니다.\n설정에서 서버 주소를 확인해주세요.\n연동 시도 주소: " + linkUrl);
+                            errorLabel.setVisibility(View.VISIBLE);
+                        }
+                    });
+                }
+            }
+        }).start();
+
+        return qrLayout;
+    }
+
+    private LinearLayout detectedPhotoItemEditor(final DetectedPhotoItem item, final int index) {
         LinearLayout editor = new LinearLayout(this);
         editor.setOrientation(LinearLayout.VERTICAL);
         editor.setPadding(0, dp(10), 0, dp(10));
@@ -227,9 +708,29 @@ public class MainActivity extends Activity {
         LinearLayout actions = row();
         actions.addView(button("수정 후 저장", false, new View.OnClickListener() {
             @Override public void onClick(View v) {
-                saveDbItemWithAutoDrawer(itemNameInput, quantityInput, new Runnable() {
-                    @Override public void run() {
-                        showCamera();
+                final String newName = itemNameInput.getText().toString().trim();
+                final int newQty = parsePositiveNumber(quantityInput.getText().toString().trim(), 1, "개수");
+                if (newQty <= 0) return;
+
+                fetchLatestDrawerNumber(new DrawerNumberCallback() {
+                    @Override public void onSuccess(final int drawerNumber) {
+                        saveDbItemValues(newName, newQty, drawerNumber, new ApiCallback() {
+                            @Override public void onSuccess(JSONObject response) {
+                                DetectedPhotoItem updated = new DetectedPhotoItem(item.id, newName, newQty, item.confidence);
+                                updated.assignedDrawerNumber = drawerNumber;
+                                detectedPhotoItems.set(index, updated);
+
+                                dbStatusText = "DB 서버: 마지막 저장 성공";
+                                Toast.makeText(MainActivity.this, "DB 서버에 저장했습니다.", Toast.LENGTH_SHORT).show();
+                                showCamera();
+                            }
+                            @Override public void onFailure(String message) {
+                                Toast.makeText(MainActivity.this, "DB 저장 실패: " + message, Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    }
+                    @Override public void onFailure(String message) {
+                        Toast.makeText(MainActivity.this, "서랍 센서 정보를 받아올 수 없습니다: " + message, Toast.LENGTH_LONG).show();
                     }
                 });
             }
@@ -253,16 +754,12 @@ public class MainActivity extends Activity {
     }
 
     private void openGallery() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        Intent intent = new Intent(Intent.ACTION_PICK);
         intent.setType("image/*");
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-
         try {
             startActivityForResult(intent, REQUEST_PICK_IMAGE);
-        } catch (ActivityNotFoundException openDocumentMissing) {
-            Intent fallback = new Intent(Intent.ACTION_PICK);
+        } catch (ActivityNotFoundException openMissing) {
+            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
             fallback.setType("image/*");
             try {
                 startActivityForResult(fallback, REQUEST_PICK_IMAGE);
@@ -286,32 +783,38 @@ public class MainActivity extends Activity {
             } catch (SecurityException ignored) {
                 // Some gallery apps return a temporary URI. It is still usable for this screen.
             }
-            Toast.makeText(this, "갤러리 이미지를 선택했습니다.", Toast.LENGTH_SHORT).show();
-            showCamera();
+            Toast.makeText(this, "갤러리 이미지를 선택했습니다. 업로드 및 분석을 시작합니다.", Toast.LENGTH_SHORT).show();
+            analyzeSelectedPhoto();
         }
     }
 
     private void analyzeSelectedPhoto() {
         if (selectedImageUri == null) {
-            Toast.makeText(this, "\uBA3C\uC800 \uAC24\uB7EC\uB9AC\uC5D0\uC11C \uC0AC\uC9C4\uC744 \uC120\uD0DD\uD574\uC8FC\uC138\uC694.", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "이미지를 선택한 뒤 분석을 요청하세요.", Toast.LENGTH_SHORT).show();
             return;
         }
-        Toast.makeText(this, "Gemini \uBD84\uC11D\uC744 \uC694\uCCAD\uD569\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show();
+        isPhotoUploading = true;
+        isPhotoAnalyzing = false;
+        showCamera();
         uploadPhotoForAnalysis(selectedImageUri, new ApiCallback() {
             @Override public void onSuccess(JSONObject response) {
+                isPhotoUploading = false;
+                isPhotoAnalyzing = false;
                 detectedPhotoItems.clear();
                 detectedPhotoItems.addAll(parseDetectedPhotoItems(response));
                 if (detectedPhotoItems.isEmpty()) {
-                    Toast.makeText(MainActivity.this, "\uC778\uC2DD\uB41C \uBB3C\uD488\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_LONG).show();
-                    showCamera();
+                    Toast.makeText(MainActivity.this, "인식된 물품이 없습니다.", Toast.LENGTH_LONG).show();
                 } else {
-                    Toast.makeText(MainActivity.this, "Gemini\uAC00 " + detectedPhotoItems.size() + "\uAC1C \uBB3C\uD488\uC744 \uC778\uC2DD\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show();
-                    saveDetectedItemsWithAutoDrawer();
+                    Toast.makeText(MainActivity.this, "Gemini가 " + detectedPhotoItems.size() + "개 물품을 인식했습니다.", Toast.LENGTH_SHORT).show();
                 }
+                showCamera();
             }
 
             @Override public void onFailure(String message) {
-                Toast.makeText(MainActivity.this, "\uC0AC\uC9C4 \uBD84\uC11D \uC2E4\uD328: " + message, Toast.LENGTH_LONG).show();
+                isPhotoUploading = false;
+                isPhotoAnalyzing = false;
+                Toast.makeText(MainActivity.this, "사진 분석 실패: " + message, Toast.LENGTH_LONG).show();
+                showCamera();
             }
         });
     }
@@ -353,6 +856,14 @@ public class MainActivity extends Activity {
                     }
                     writeString(outputStream, "\r\n--" + boundary + "--\r\n");
                     outputStream.flush();
+
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            isPhotoUploading = false;
+                            isPhotoAnalyzing = true;
+                            showCamera();
+                        }
+                    });
 
                     int responseCode = connection.getResponseCode();
                     InputStream responseStream = responseCode >= 200 && responseCode < 300
@@ -664,11 +1175,79 @@ public class MainActivity extends Activity {
         }
         page.addView(cart);
 
-        page.addView(button("통합 리스트 생성", true, new View.OnClickListener() {
+        page.addView(button("입력 완료", true, new View.OnClickListener() {
             @Override public void onClick(View v) { showShoppingListName(); }
         }));
 
+        page.addView(button("작성 완료 (QR로 내보내기)", false, new View.OnClickListener() {
+            @Override public void onClick(View v) { showShoppingListQrExport(); }
+        }));
+
         setScreen(page);
+    }
+
+    // [쇼핑리스트 QR 내보내기] 현재 쇼핑리스트 DB(모든 사용자 카트)에 담긴 전체 목록을 JSON 문자열로 압축하고,
+    // 그 문자열을 QR 코드로 그려서 화면에 띄운다. 사용자는 이 QR을 폰 카메라로 찍어 갤러리에 저장하고,
+    // 추후 매장 Temi가 그 사진을 스캔해서 쇼핑리스트를 읽는 데 사용한다.
+    private void showShoppingListQrExport() {
+        LinearLayout page = page("쇼핑리스트 QR 내보내기", "현재 쇼핑리스트 전체를 QR 코드 하나로 압축해서 보여줍니다.");
+        page.addView(backTo("쇼핑리스트로 돌아가기", new View.OnClickListener() {
+            @Override public void onClick(View v) { showShoppingInput(); }
+        }));
+
+        String shoppingListJson = buildShoppingListJson();
+
+        LinearLayout card = card();
+        card.addView(label("쇼핑리스트 QR"));
+        card.addView(body("이 QR을 스마트폰으로 찍어 갤러리에 저장해두세요. 매장 Temi가 이 사진을 스캔해서 쇼핑리스트를 확인합니다."));
+
+        if (totalCartItemCount() == 0) {
+            card.addView(body("내보낼 쇼핑리스트 항목이 없습니다."));
+        } else {
+            ImageView qrImageView = new ImageView(this);
+            int size = dp(260);
+            Bitmap qrBitmap = createQrBitmap(shoppingListJson, size);
+            if (qrBitmap != null) {
+                qrImageView.setImageBitmap(qrBitmap);
+            } else {
+                card.addView(body("QR 코드 생성에 실패했습니다."));
+            }
+            LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(size, size);
+            qrParams.gravity = Gravity.CENTER;
+            qrParams.topMargin = dp(12);
+            card.addView(qrImageView, qrParams);
+        }
+        page.addView(card);
+
+        setScreen(page);
+    }
+
+    // 모든 사용자의 카트(cartItemsByUser)를 합쳐 {"shopping_list":[{"user":..,"name":..,"quantity":..}, ...]} 형태의 JSON으로 만든다.
+    private String buildShoppingListJson() {
+        JSONArray itemsArray = new JSONArray();
+        for (int userIndex = 0; userIndex < cartItemsByUser.size(); userIndex++) {
+            String userName = userIndex < shoppingUsers.size() ? shoppingUsers.get(userIndex) : ("사용자 " + (userIndex + 1));
+            for (String cartItemText : cartItemsByUser.get(userIndex)) {
+                ItemQuantity parsed = parseItemQuantity(cartItemText);
+                try {
+                    JSONObject itemObject = new JSONObject();
+                    itemObject.put("user", userName);
+                    itemObject.put("name", parsed.name);
+                    itemObject.put("quantity", parsed.quantity);
+                    itemsArray.put(itemObject);
+                } catch (JSONException ignored) {
+                    // 개별 항목 변환 실패는 건너뛰고 나머지 항목으로 계속 진행한다.
+                }
+            }
+        }
+
+        try {
+            JSONObject root = new JSONObject();
+            root.put("shopping_list", itemsArray);
+            return root.toString();
+        } catch (JSONException error) {
+            return "{\"shopping_list\":[]}";
+        }
     }
 
     private void showShoppingListName() {
@@ -697,41 +1276,36 @@ public class MainActivity extends Activity {
     }
 
     private void showShoppingSave() {
-        LinearLayout page = page("쇼핑리스트저장", "보유 항목과 구매 필요 항목을 분류한 뒤 저장합니다.");
+        LinearLayout page = page("최종 쇼핑 리스트", "DB에 없는 구매 필요 항목만 정리한 최종 리스트입니다.");
         page.addView(backTo("입력으로 돌아가기", new View.OnClickListener() {
             @Override public void onClick(View v) { showShoppingInput(); }
         }));
 
+        if (integratedShoppingLists.isEmpty()) {
+            page.addView(body("생성된 통합 리스트가 없습니다."));
+            setScreen(page);
+            return;
+        }
+
+        IntegratedShoppingList activeList = selectedIntegratedListIndex >= 0 && selectedIntegratedListIndex < integratedShoppingLists.size()
+                ? integratedShoppingLists.get(selectedIntegratedListIndex)
+                : integratedShoppingLists.get(integratedShoppingLists.size() - 1);
+
         LinearLayout summary = card();
-        summary.addView(label("분류완료 - " + totalCartItemCount() + "개 항목"));
-        if (totalCartItemCount() == 0) {
-            summary.addView(body("저장할 구매 품목이 없습니다."));
+        summary.addView(label("최종 구매 필요 항목 - " + activeList.items.size() + "개"));
+        if (activeList.items.isEmpty()) {
+            summary.addView(body("구매할 품목이 없습니다. (모든 품목 보유 중)"));
         } else {
-            Map<String, Integer> ownedQuantityByName = buildOwnedQuantityByName();
-            for (int userIndex = 0; userIndex < shoppingUsers.size(); userIndex++) {
-                List<String> userCartItems = cartItemsByUser.get(userIndex);
-                for (String item : userCartItems) {
-                    ItemQuantity requestedItem = parseItemQuantity(item);
-                    int ownedQuantity = ownedQuantityByName.containsKey(requestedItem.name)
-                            ? ownedQuantityByName.get(requestedItem.name)
-                            : 0;
-                    String result = ownedQuantity >= requestedItem.quantity
-                            ? "이미 보유하고 있습니다"
-                            : "구매필요";
-                    summary.addView(listItem(
-                            item,
-                            shoppingUsers.get(userIndex) + " / " + result
-                                    + " (보유 " + ownedQuantity + "개, 요청 " + requestedItem.quantity + "개)"));
-                }
+            for (String item : activeList.items) {
+                summary.addView(listItem(item, "구매 필요"));
             }
         }
         page.addView(summary);
 
         LinearLayout actions = row();
-        actions.addView(button("보유항목제외", false, null), weightParams());
-        actions.addView(button("리스트 저장", true, new View.OnClickListener() {
+        actions.addView(button("저장", true, new View.OnClickListener() {
             @Override public void onClick(View v) { showStoreTemi(); }
-        }), weightParams());
+        }));
         page.addView(actions);
 
         setScreen(page);
@@ -764,15 +1338,31 @@ public class MainActivity extends Activity {
         final String finalItemNameForPurchase = itemName;
         final int finalItemCountForPurchase = itemCount;
         if (isAlreadyOwned(itemName, itemCount)) {
-            showAlreadyOwnedNotice(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    addShoppingItemToServer(finalItemNameForPurchase, finalItemCountForPurchase);
-                }
-            });
+            handleDuplicateItemDetected(finalItemNameForPurchase, finalItemCountForPurchase);
             return;
         }
 
         addShoppingItemToServer(itemName, itemCount);
+    }
+
+    // [서랍 관리 DB 대조] 서랍에 남은 같은 물건의 개수가 요청 개수 이상이면 저장을 보류하고
+    // 음성(TTS)으로 "이미 구매된 물건입니다"를 안내한 뒤, 음성 답변("그래도 추가할래" 등)을 기다린다.
+    // (화면 터치로도 같은 결과를 낼 수 있도록 기존 "+ 추가 구매" 버튼도 함께 보여준다.)
+    private void handleDuplicateItemDetected(final String itemName, final int requestedQuantity) {
+        pendingDuplicateItemName = itemName;
+        pendingDuplicateItemCount = requestedQuantity;
+        isAwaitingDuplicateConfirmation = true;
+
+        speak("이미 구매된 물건입니다");
+
+        showAlreadyOwnedNotice(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                isAwaitingDuplicateConfirmation = false;
+                pendingDuplicateItemName = null;
+                pendingDuplicateItemCount = 0;
+                addShoppingItemToServer(itemName, requestedQuantity);
+            }
+        });
     }
 
     private void addShoppingItemToServer(final String itemName, int itemCount) {
@@ -1118,7 +1708,7 @@ public class MainActivity extends Activity {
                 integratedShoppingLists.add(new IntegratedShoppingList(finalListId, title, collectRequestedShoppingItems(), items));
                 selectedIntegratedListIndex = integratedShoppingLists.size() - 1;
                 Toast.makeText(MainActivity.this, "\uD1B5\uD569 \uB9AC\uC2A4\uD2B8\uB97C DB \uC11C\uBC84\uC5D0 \uC800\uC7A5\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show();
-                showStoreTemi();
+                showShoppingSave();
             }
 
             @Override public void onFailure(String message) {
@@ -1285,6 +1875,7 @@ public class MainActivity extends Activity {
         final String name;
         final int quantity;
         final double confidence;
+        int assignedDrawerNumber = 1;
 
         DetectedPhotoItem(int id, String name, int quantity, double confidence) {
             this.id = id;
@@ -1305,6 +1896,24 @@ public class MainActivity extends Activity {
             this.title = title;
             this.requestedItems = requestedItems;
             this.items = items;
+        }
+    }
+
+    private static class StoreTransferItem {
+        final String itemName;
+        final int quantity;
+        final boolean inStock;
+        final String section;
+        final String aisle;
+        final String shelf;
+
+        StoreTransferItem(String itemName, int quantity, boolean inStock, String section, String aisle, String shelf) {
+            this.itemName = itemName;
+            this.quantity = quantity;
+            this.inStock = inStock;
+            this.section = section;
+            this.aisle = aisle;
+            this.shelf = shelf;
         }
     }
 
@@ -1399,29 +2008,6 @@ public class MainActivity extends Activity {
         }
         reader.close();
         return builder.toString();
-    }
-
-    private String loadApiBaseUrlFromAssets() {
-        try {
-            InputStream inputStream = getAssets().open(IP_CONFIG_FILE);
-            String jsonText = readStream(inputStream);
-            inputStream.close();
-            if (jsonText == null || jsonText.length() == 0) {
-                return null;
-            }
-            JSONObject config = new JSONObject(jsonText);
-            String apiBaseUrl = config.optString("api_base_url", null);
-            if (apiBaseUrl != null && apiBaseUrl.length() > 0) {
-                return apiBaseUrl;
-            }
-            String emulatorUrl = config.optString("emulator_base_url", null);
-            if (emulatorUrl != null && emulatorUrl.length() > 0) {
-                return emulatorUrl;
-            }
-            return config.optString("server_base_url", null);
-        } catch (Exception ignored) {
-            return null;
-        }
     }
 
     private JSONObject parseJsonObject(String responseBody) throws JSONException {
@@ -1554,7 +2140,8 @@ public class MainActivity extends Activity {
         final int[] successCount = new int[] { 0 };
         final int[] failureCount = new int[] { 0 };
 
-        for (DetectedPhotoItem item : detectedPhotoItems) {
+        for (final DetectedPhotoItem item : detectedPhotoItems) {
+            item.assignedDrawerNumber = drawerNumber;
             saveDbItemValues(item.name, item.quantity, drawerNumber, new ApiCallback() {
                 @Override public void onSuccess(JSONObject response) {
                     successCount[0]++;
@@ -1582,7 +2169,13 @@ public class MainActivity extends Activity {
             dbStatusText = "DB 서버: 자동 저장 " + successCount + "개 성공, " + failureCount + "개 실패";
             Toast.makeText(this, dbStatusText, Toast.LENGTH_LONG).show();
         }
-        showCamera();
+        if (shouldStartPlacementAfterSave) {
+            shouldStartPlacementAfterSave = false;
+            placementItemIndex = 0;
+            showPlacementGuide();
+        } else {
+            showCamera();
+        }
     }
 
     private void saveDbItemWithAutoDrawer(final EditText itemNameInput, final EditText quantityInput, final Runnable afterSave) {
@@ -1821,6 +2414,87 @@ public class MainActivity extends Activity {
         return -1;
     }
 
+    private void showPlacementGuide() {
+        if (detectedPhotoItems.isEmpty()) {
+            Toast.makeText(this, "수납할 물품이 없습니다.", Toast.LENGTH_SHORT).show();
+            showHome();
+            return;
+        }
+
+        LinearLayout page = page("물건 넣기", "물건을 순서대로 서랍에 넣어주세요.");
+        page.addView(backButton());
+
+        DetectedPhotoItem currentItem = detectedPhotoItems.get(Math.min(placementItemIndex, detectedPhotoItems.size() - 1));
+        LinearLayout currentCard = card();
+        currentCard.addView(label("현재 물건"));
+        currentCard.addView(big(currentItem.name + " " + currentItem.quantity + "개"));
+        currentCard.addView(label("서랍 위치"));
+        currentCard.addView(big(currentItem.assignedDrawerNumber + "번 서랍"));
+        page.addView(currentCard);
+
+        LinearLayout progressCard = card();
+        progressCard.addView(label("진행 상태"));
+        progressCard.addView(body("총 " + detectedPhotoItems.size() + "개 중 " + (placementItemIndex + 1) + "번째 진행 중"));
+        page.addView(progressCard);
+
+        LinearLayout actions = row();
+        if (placementItemIndex < detectedPhotoItems.size() - 1) {
+            actions.addView(button("다음 물건", true, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    placementItemIndex++;
+                    showPlacementGuide();
+                }
+            }));
+        } else {
+            actions.addView(button("완료", true, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    showPlacementComplete();
+                }
+            }));
+        }
+        page.addView(actions);
+        setScreen(page);
+    }
+
+    private void showPlacementComplete() {
+        LinearLayout page = page("수납 완료", "모든 물건 넣기가 완료되었습니다.");
+        page.addView(body("홈으로 돌아갑니다."));
+        page.addView(button("홈으로", true, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                placementItemIndex = 0;
+                detectedPhotoItems.clear();
+                showHome();
+            }
+        }));
+        setScreen(page);
+    }
+
+    private void startStoreTemiGuidance() {
+        if (integratedShoppingLists.isEmpty()) {
+            Toast.makeText(this, "전송할 리스트가 없습니다.", Toast.LENGTH_SHORT).show();
+            showStoreTemi();
+            return;
+        }
+        isStoreTemiGuidanceActive = true;
+        storeTemiGuidanceStep = 0;
+        showStoreTemi();
+    }
+
+    private void advanceStoreTemiGuidance() {
+        storeTemiGuidanceStep++;
+        showStoreTemi();
+    }
+
+    private List<String> availableStoreTemiItems() {
+        List<String> availableItems = new ArrayList<>();
+        for (StoreTransferItem item : storeTransferItems) {
+            if (item.inStock) {
+                availableItems.add(item.itemName + " " + item.quantity + "개 (" + item.section + " " + item.aisle + "구역 " + item.shelf + "열)");
+            }
+        }
+        return availableItems;
+    }
+
     private void showSettings() {
         LinearLayout page = page("설정", "Temi 연결과 서랍 관리를 설정합니다.");
         page.addView(backButton());
@@ -1845,14 +2519,24 @@ public class MainActivity extends Activity {
         server.addView(serverActions);
         page.addView(server);
 
+        LinearLayout qrLinkCard = card();
+        qrLinkCard.addView(label("Temi DB 입력창 QR 주소"));
+        qrLinkCard.addView(body("스마트폰이 같은 공유기(Wi-Fi)에서 접속할 주소입니다. 현재 주소: " + temiDbInputWebUrl));
+        final EditText qrLinkUrlInput = input("예: http://192.168.0.10:8000/api/drawers/link?device=temi");
+        qrLinkUrlInput.setText(temiDbInputWebUrl);
+        qrLinkCard.addView(qrLinkUrlInput);
+        qrLinkCard.addView(button("QR 주소 저장", false, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                saveTemiDbInputWebUrl(qrLinkUrlInput);
+            }
+        }));
+        page.addView(qrLinkCard);
+
         page.addView(navButton("가정 Temi", "집에서 사용하는 Temi를 QR로 연결합니다.", new View.OnClickListener() {
             @Override public void onClick(View v) { showHomeTemi(); }
         }));
         page.addView(navButton("매장 Temi", "저장된 쇼핑리스트를 매장 Temi로 전송합니다.", new View.OnClickListener() {
             @Override public void onClick(View v) { showStoreTemi(); }
-        }));
-        page.addView(navButton("서랍 관리", "연동 서랍을 QR로 등록하고 상태를 확인합니다.", new View.OnClickListener() {
-            @Override public void onClick(View v) { showDrawerManager(); }
         }));
 
         setScreen(page);
@@ -1871,6 +2555,25 @@ public class MainActivity extends Activity {
         editor.apply();
         dbStatusText = "DB 서버: 주소 저장됨";
         Toast.makeText(this, "DB/API 서버 주소를 저장했습니다.", Toast.LENGTH_SHORT).show();
+        showSettings();
+    }
+
+    private void saveTemiDbInputWebUrl(EditText qrLinkUrlInput) {
+        String value = normalizeApiBaseUrl(qrLinkUrlInput.getText().toString().trim());
+        if (value.length() == 0) {
+            Toast.makeText(this, "QR 주소를 입력해주세요.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        temiDbInputWebUrl = value;
+        SharedPreferences.Editor editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+        editor.putString(PREF_TEMI_DB_INPUT_WEB_URL, temiDbInputWebUrl);
+        editor.apply();
+        // 주소가 바뀌었으므로 캐시를 비우고 새 QR을 미리 다시 구워둔다.
+        cachedTemiDbInputQrBitmap = null;
+        cachedTemiDbInputQrUrl = null;
+        prewarmTemiDbInputQrCode();
+        Toast.makeText(this, "Temi DB 입력창 QR 주소를 저장했습니다.", Toast.LENGTH_SHORT).show();
         showSettings();
     }
 
@@ -1894,26 +2597,82 @@ public class MainActivity extends Activity {
     }
 
     private void showStoreTemi() {
-        LinearLayout page = page("매장 Temi", "매장 Temi 연결 후 저장된 리스트를 전송합니다.");
+        LinearLayout page = page("매장 Temi 안내", "매장 Temi에 쇼핑리스트를 전달하고 재고 있는 물품만 안내합니다.");
         page.addView(backTo("설정으로 돌아가기", new View.OnClickListener() {
             @Override public void onClick(View v) { showSettings(); }
         }));
         page.addView(qrPanel("검색된 Temi: STORE-TEMI-03"));
+
+        if (selectedIntegratedListIndex < 0 && !integratedShoppingLists.isEmpty()) {
+            selectedIntegratedListIndex = 0;
+        }
+
         LinearLayout savedLists = card();
-        savedLists.addView(label("\uC2E4\uC81C DB \uC800\uC7A5 \uD1B5\uD569 \uB9AC\uC2A4\uD2B8"));
+        savedLists.addView(label("통합 쇼핑 리스트"));
         if (integratedShoppingLists.isEmpty()) {
-            savedLists.addView(body("\uC804\uC1A1\uD560 \uD1B5\uD569 \uB9AC\uC2A4\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4."));
+            savedLists.addView(body("전송할 통합 리스트가 없습니다."));
         } else {
+            IntegratedShoppingList activeList = integratedShoppingLists.get(selectedIntegratedListIndex);
+            savedLists.addView(label("선택된 리스트: " + activeList.title + " (ID " + activeList.id + ")"));
+            savedLists.addView(body("요청 항목 " + activeList.requestedItems.size() + "개, 실제 구매 항목 " + activeList.items.size() + "개"));
             for (int i = 0; i < integratedShoppingLists.size(); i++) {
                 savedLists.addView(integratedListRow(integratedShoppingLists.get(i), i));
             }
         }
         page.addView(savedLists);
-        page.addView(button("\uC120\uD0DD\uD55C \uB9AC\uC2A4\uD2B8\uB97C \uB9E4\uC7A5 Temi\uC5D0\uAC8C \uC804\uC1A1", true, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                transferSelectedIntegratedList();
+
+        if (!isStoreTemiGuidanceActive) {
+            if (!isShoppingListReceived) {
+                page.addView(button("쇼핑리스트 받아오기", true, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        transferSelectedIntegratedList();
+                    }
+                }));
+            } else {
+                page.addView(button("물건 안내 시작", true, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        isStoreTemiGuidanceActive = true;
+                        storeTemiGuidanceStep = 0;
+                        showStoreTemi();
+                    }
+                }));
             }
-        }));
+        }
+
+        if (isStoreTemiGuidanceActive) {
+            List<String> availableItems = availableStoreTemiItems();
+            LinearLayout progressCard = card();
+            progressCard.addView(label("진행 상태"));
+            if (availableItems.isEmpty()) {
+                progressCard.addView(body("재고 있는 안내 대상 물품이 없습니다."));
+                page.addView(button("홈으로", true, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        isStoreTemiGuidanceActive = false;
+                        isShoppingListReceived = false;
+                        showHome();
+                    }
+                }));
+            } else if (storeTemiGuidanceStep >= availableItems.size()) {
+                progressCard.addView(body("안내가 완료되었습니다."));
+                page.addView(button("홈으로", true, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        isStoreTemiGuidanceActive = false;
+                        isShoppingListReceived = false;
+                        showHome();
+                    }
+                }));
+            } else {
+                progressCard.addView(body("현재 안내 중 항목"));
+                progressCard.addView(big(availableItems.get(storeTemiGuidanceStep)));
+                progressCard.addView(body("진행 " + (storeTemiGuidanceStep + 1) + " / " + availableItems.size()));
+                page.addView(button(storeTemiGuidanceStep == availableItems.size() - 1 ? "완료" : "다음 물건", true, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        advanceStoreTemiGuidance();
+                    }
+                }));
+            }
+            page.addView(progressCard);
+        }
 
         setScreen(page);
     }
@@ -2009,6 +2768,25 @@ public class MainActivity extends Activity {
         requestJson("POST", "/api/final-shopping-lists/" + integratedList.id + "/transfer", payload, new ApiCallback() {
             @Override public void onSuccess(JSONObject response) {
                 Toast.makeText(MainActivity.this, integratedList.title + " \uB9AC\uC2A4\uD2B8\uB97C \uB9E4\uC7A5 Temi\uC5D0\uAC8C \uC804\uC1A1\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_LONG).show();
+                
+                storeTransferItems.clear();
+                JSONArray itemsArray = response.optJSONArray("items");
+                if (itemsArray != null) {
+                    for (int i = 0; i < itemsArray.length(); i++) {
+                        JSONObject itemObj = itemsArray.optJSONObject(i);
+                        if (itemObj != null) {
+                            String itemName = itemObj.optString("item_name");
+                            int quantity = itemObj.optInt("quantity", 1);
+                            boolean inStock = itemObj.optBoolean("in_stock", false);
+                            String section = itemObj.optString("section", "\uBBF8\uC9C0\uC815");
+                            String aisle = itemObj.optString("aisle", "-");
+                            String shelf = itemObj.optString("shelf", "-");
+                            storeTransferItems.add(new StoreTransferItem(itemName, quantity, inStock, section, aisle, shelf));
+                        }
+                    }
+                }
+                
+                isShoppingListReceived = true;
                 showStoreTemi();
             }
 
@@ -2016,24 +2794,6 @@ public class MainActivity extends Activity {
                 Toast.makeText(MainActivity.this, "\uB9E4\uC7A5 Temi \uC804\uC1A1 \uC2E4\uD328: " + message, Toast.LENGTH_LONG).show();
             }
         });
-    }
-
-    private void showDrawerManager() {
-        LinearLayout page = page("서랍관리", "QR로 서랍을 연결하고 연결된 서랍을 확인합니다.");
-        page.addView(backTo("설정으로 돌아가기", new View.OnClickListener() {
-            @Override public void onClick(View v) { showSettings(); }
-        }));
-        page.addView(qrPanel("검색된 서랍: DRAWER-01"));
-        page.addView(button("연결", true, null));
-
-        LinearLayout drawers = card();
-        drawers.addView(label("연결된 서랍 리스트"));
-        drawers.addView(listItem("서랍 1", "정상"));
-        page.addView(drawers);
-        page.addView(button("확인", true, new View.OnClickListener() {
-            @Override public void onClick(View v) { showSettings(); }
-        }));
-        setScreen(page);
     }
 
     private void showQrScreen(String title, String connected, String searched, String action, View.OnClickListener listener) {
@@ -2054,19 +2814,19 @@ public class MainActivity extends Activity {
     private LinearLayout page(String title, String subtitle) {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(18), dp(22), dp(18), dp(28));
+        page.setPadding(dp(24), dp(32), dp(24), dp(36));
 
         TextView titleView = new TextView(this);
         titleView.setText(title);
         titleView.setTextColor(getColorCompat(R.color.temi_text));
-        titleView.setTextSize(28);
+        titleView.setTextSize(36);
         titleView.setGravity(Gravity.START);
         titleView.setTypeface(null, 1);
         page.addView(titleView);
 
         TextView subtitleView = body(subtitle);
         subtitleView.setTextColor(getColorCompat(R.color.temi_muted));
-        page.addView(subtitleView, params(-1, -2, 0, 6, 0, 16));
+        page.addView(subtitleView, params(-1, -2, 0, 8, 0, 20));
         return page;
     }
 
@@ -2104,11 +2864,11 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.setPadding(dp(22), dp(20), dp(22), dp(20));
         card.setBackgroundResource(R.drawable.temi_card);
         card.setGravity(Gravity.CENTER_VERTICAL);
         card.setClipToOutline(true);
-        card.setLayoutParams(params(-1, -2, 0, 0, 0, 12));
+        card.setLayoutParams(params(-1, -2, 0, 0, 0, 16));
         return card;
     }
 
@@ -2117,22 +2877,13 @@ public class MainActivity extends Activity {
         qr.setText("QR 카메라\n\n" + searchedText);
         qr.setGravity(Gravity.CENTER);
         qr.setTextColor(Color.WHITE);
-        qr.setTextSize(17);
+        qr.setTextSize(24);
         qr.setBackgroundResource(R.drawable.temi_camera_panel);
-        qr.setLayoutParams(params(-1, dp(220), 0, 0, 0, 12));
+        qr.setLayoutParams(params(-1, dp(300), 0, 0, 0, 16));
         return qr;
     }
 
     private TextView label(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(getColorCompat(R.color.temi_text));
-        view.setTextSize(15);
-        view.setTypeface(null, 1);
-        return view;
-    }
-
-    private TextView big(String text) {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextColor(getColorCompat(R.color.temi_text));
@@ -2141,12 +2892,21 @@ public class MainActivity extends Activity {
         return view;
     }
 
+    private TextView big(String text) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(getColorCompat(R.color.temi_text));
+        view.setTextSize(28);
+        view.setTypeface(null, 1);
+        return view;
+    }
+
     private TextView body(String text) {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextColor(getColorCompat(R.color.temi_muted));
-        view.setTextSize(14);
-        view.setLineSpacing(2, 1.0f);
+        view.setTextSize(18);
+        view.setLineSpacing(3, 1.1f);
         return view;
     }
 
@@ -2154,10 +2914,10 @@ public class MainActivity extends Activity {
         EditText editText = new EditText(this);
         editText.setHint(hint);
         editText.setSingleLine(true);
-        editText.setTextSize(15);
+        editText.setTextSize(20);
         editText.setBackgroundResource(R.drawable.temi_input);
-        editText.setPadding(dp(12), dp(8), dp(12), dp(8));
-        editText.setLayoutParams(params(-1, dp(48), 0, 8, 0, 8));
+        editText.setPadding(dp(16), dp(12), dp(16), dp(12));
+        editText.setLayoutParams(params(-1, dp(64), 0, 10, 0, 10));
         return editText;
     }
 
@@ -2165,11 +2925,11 @@ public class MainActivity extends Activity {
         TextView item = new TextView(this);
         item.setText(title + "    " + meta);
         item.setTextColor(getColorCompat(R.color.temi_text));
-        item.setTextSize(15);
+        item.setTextSize(20);
         item.setGravity(Gravity.CENTER_VERTICAL);
-        item.setPadding(dp(12), dp(10), dp(12), dp(10));
+        item.setPadding(dp(16), dp(14), dp(16), dp(14));
         item.setBackgroundResource(R.drawable.temi_input);
-        item.setLayoutParams(params(-1, -2, 0, 8, 0, 0));
+        item.setLayoutParams(params(-1, -2, 0, 10, 0, 0));
         return item;
     }
 
@@ -2177,23 +2937,23 @@ public class MainActivity extends Activity {
         LinearLayout item = row();
         item.setGravity(Gravity.CENTER_VERTICAL);
         item.setBackgroundResource(R.drawable.temi_input);
-        item.setPadding(dp(12), dp(6), dp(8), dp(6));
-        item.setLayoutParams(params(-1, -2, 0, 8, 0, 0));
+        item.setPadding(dp(16), dp(10), dp(12), dp(10));
+        item.setLayoutParams(params(-1, -2, 0, 10, 0, 0));
 
         TextView titleView = new TextView(this);
         titleView.setText(title);
         titleView.setTextColor(getColorCompat(R.color.temi_text));
-        titleView.setTextSize(15);
+        titleView.setTextSize(20);
         titleView.setGravity(Gravity.CENTER_VERTICAL);
-        item.addView(titleView, new LinearLayout.LayoutParams(0, dp(48), 1));
+        item.addView(titleView, new LinearLayout.LayoutParams(0, dp(64), 1));
 
         Button deleteButton = button("삭제", false, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 deleteShoppingItem(itemIndex);
             }
         });
-        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(dp(88), dp(44));
-        deleteParams.setMargins(dp(8), 0, 0, 0);
+        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(dp(110), dp(58));
+        deleteParams.setMargins(dp(12), 0, 0, 0);
         item.addView(deleteButton, deleteParams);
         return item;
     }
@@ -2221,9 +2981,9 @@ public class MainActivity extends Activity {
         chip.setText(text);
         chip.setTextColor(selected ? Color.WHITE : getColorCompat(R.color.temi_text));
         chip.setGravity(Gravity.CENTER);
-        chip.setTextSize(14);
+        chip.setTextSize(18);
         chip.setBackgroundResource(selected ? R.drawable.temi_primary_button : R.drawable.temi_input);
-        chip.setPadding(dp(8), dp(10), dp(8), dp(10));
+        chip.setPadding(dp(12), dp(14), dp(12), dp(14));
         chip.setOnClickListener(listener);
         return chip;
     }
@@ -2232,13 +2992,13 @@ public class MainActivity extends Activity {
         Button button = new Button(this);
         button.setText(text);
         button.setAllCaps(false);
-        button.setTextSize(15);
+        button.setTextSize(20);
         button.setGravity(Gravity.CENTER);
         button.setTextColor(primary ? Color.WHITE : getColorCompat(R.color.temi_text));
         button.setBackgroundResource(primary ? R.drawable.temi_primary_button : R.drawable.temi_outline_button);
         button.setOnClickListener(listener);
-        button.setMinHeight(dp(48));
-        button.setLayoutParams(params(-1, dp(50), 0, 8, 0, 8));
+        button.setMinHeight(dp(64));
+        button.setLayoutParams(params(-1, dp(66), 0, 10, 0, 10));
         return button;
     }
 
@@ -2253,13 +3013,13 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER);
-        row.setLayoutParams(params(-1, -2, 0, 0, 0, 8));
+        row.setLayoutParams(params(-1, -2, 0, 0, 0, 10));
         return row;
     }
 
     private LinearLayout.LayoutParams weightParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(50), 1);
-        params.setMargins(dp(4), dp(4), dp(4), dp(4));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(66), 1);
+        params.setMargins(dp(6), dp(6), dp(6), dp(6));
         return params;
     }
 

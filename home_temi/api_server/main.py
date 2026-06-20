@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+import google.generativeai as genai
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,9 @@ SCHEMA_PATH = BASE_DIR / "schema.sql"
 UPLOAD_DIR = BASE_DIR / "uploads"
 ENV_PATH = ROOT_DIR / ".env"
 GEMINI_MODEL = "gemini-flash-latest"
+# 웹 업로드(스마트폰 촬영 -> 단일 물품 판별) 전용 모델. 더미 데이터 없이 항상 실제 API를 호출한다.
+# gemini-1.5-flash는 API에서 폐기(404)되어, 항상 최신 flash 모델로 자동 매핑되는 별칭을 사용한다.
+GEMINI_VISION_MODEL = "gemini-flash-latest"
 
 app = FastAPI(title="Temi Item Finder API")
 
@@ -199,6 +203,140 @@ def read_env_value(key: str) -> Optional[str]:
     return None
 
 
+from fastapi.responses import HTMLResponse
+
+is_temi_linked = False
+
+
+LINK_PAGE_TEMPLATE = """
+<!doctype html>
+<html>
+    <head>
+        <title>Temi 수납 입력창</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: sans-serif; text-align: center; padding: 24px; background-color: #f4f7f6; color: #333; }
+            .card { background: white; padding: 28px; border-radius: 12px; max-width: 420px; margin: 0 auto 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+            h1 { color: #2ecc71; font-size: 22px; margin-top: 0; }
+            p { font-size: 16px; line-height: 1.6; }
+            .capture-btn { display: inline-block; margin-top: 8px; padding: 16px 28px; background: #2c7a7b; color: white; border-radius: 10px; font-size: 18px; cursor: pointer; }
+            #status { margin-top: 16px; font-size: 15px; color: #555; white-space: pre-line; }
+            #preview { margin-top: 16px; max-width: 100%; border-radius: 8px; display: none; }
+            .result { background: #e8f8f0; border: 1px solid #2ecc71; border-radius: 10px; padding: 16px; margin-top: 16px; display: none; }
+            .error { background: #fdeaea; border: 1px solid #e74c3c; color: #c0392b; border-radius: 10px; padding: 16px; margin-top: 16px; display: none; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>&#10003; 연동 완료</h1>
+            <p>Temi 장치(<b>__DEVICE__</b>)와 서랍 시스템이 성공적으로 연결되었습니다.</p>
+        </div>
+
+        <div class="card">
+            <p>서랍에 넣을 물건 사진을 찍으면 Gemini가 분석해서 Temi DB에 바로 기입됩니다.</p>
+            <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none">
+            <label class="capture-btn" for="photoInput">&#128247; 서랍에 넣을 물건 사진 촬영</label>
+            <img id="preview">
+            <div id="status"></div>
+            <div class="result" id="result"></div>
+            <div class="error" id="error"></div>
+        </div>
+
+        <script>
+            var photoInput = document.getElementById('photoInput');
+            var statusEl = document.getElementById('status');
+            var resultEl = document.getElementById('result');
+            var errorEl = document.getElementById('error');
+            var previewEl = document.getElementById('preview');
+            var drawerPollTimer = null;
+
+            function stopDrawerPolling() {
+                if (drawerPollTimer) {
+                    clearTimeout(drawerPollTimer);
+                    drawerPollTimer = null;
+                }
+            }
+
+            function pollDrawerStatus() {
+                fetch('/api/web-intake/drawer-status')
+                    .then(function (response) { return response.json(); })
+                    .then(function (data) {
+                        if (data.status === 'done') {
+                            statusEl.textContent = '';
+                            resultEl.style.display = 'block';
+                            resultEl.innerHTML =
+                                '<b>' + data.item_name + '</b>을 <b>' + data.drawer_number + '번 서랍</b>에 저장했습니다.' +
+                                '<br>현재 보유 수량: ' + data.quantity + '개';
+                            return;
+                        }
+                        statusEl.textContent = '"' + data.item_name + '" 인식 완료. 아두이노 서랍 센서 확인 중...';
+                        drawerPollTimer = setTimeout(pollDrawerStatus, 2000);
+                    })
+                    .catch(function (err) {
+                        statusEl.textContent = '';
+                        errorEl.style.display = 'block';
+                        errorEl.textContent = '\\u26a0\\ufe0f ' + err.message;
+                    });
+            }
+
+            photoInput.addEventListener('change', function () {
+                var file = photoInput.files[0];
+                if (!file) {
+                    return;
+                }
+
+                stopDrawerPolling();
+                previewEl.src = URL.createObjectURL(file);
+                previewEl.style.display = 'block';
+                resultEl.style.display = 'none';
+                errorEl.style.display = 'none';
+                statusEl.textContent = '사진을 업로드하고 Gemini로 분석 중입니다...';
+
+                var formData = new FormData();
+                formData.append('image', file, file.name || 'photo.jpg');
+
+                fetch('/api/web-intake/photo', { method: 'POST', body: formData })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            return { ok: response.ok, data: data };
+                        });
+                    })
+                    .then(function (result) {
+                        if (!result.ok) {
+                            throw new Error(result.data.detail || 'Temi DB 기입에 실패했습니다.');
+                        }
+                        statusEl.textContent = '"' + result.data.item_name + '" 인식 완료. 아두이노 서랍 센서 확인 중...';
+                        pollDrawerStatus();
+                    })
+                    .catch(function (err) {
+                        statusEl.textContent = '';
+                        errorEl.style.display = 'block';
+                        errorEl.textContent = '\\u26a0\\ufe0f ' + err.message;
+                    });
+            });
+        </script>
+    </body>
+</html>
+"""
+
+
+@app.get("/api/drawers/link", response_class=HTMLResponse)
+def link_drawer(device: str = "temi"):
+    global is_temi_linked
+    is_temi_linked = True
+    return LINK_PAGE_TEMPLATE.replace("__DEVICE__", device)
+
+
+@app.get("/api/drawers/link-status")
+def get_drawer_link_status():
+    global is_temi_linked
+    status = is_temi_linked
+    if is_temi_linked:
+        is_temi_linked = False
+    return {"linked": status}
+
+
 def extract_json_object(text: str) -> dict:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -213,12 +351,7 @@ def extract_json_object(text: str) -> dict:
         return json.loads(match.group(0))
 
 
-def call_gemini_image_analysis(image_bytes: bytes, mime_type: str) -> tuple[dict, str, str]:
-    api_key = read_env_value("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured")
-
-    prompt = """
+ITEM_LIST_PROMPT = """
 사진 안에 있는 보관 대상 물건을 식별해줘.
 같은 종류의 물건이 여러 개 있으면 각각 따로 번호를 붙여줘.
 일반 배경, 손, 사람, 책상, 벽처럼 보관 대상이 아닌 것은 제외해줘.
@@ -230,6 +363,15 @@ def call_gemini_image_analysis(image_bytes: bytes, mime_type: str) -> tuple[dict
   ]
 }
 """.strip()
+
+WEB_INTAKE_PROMPT = """
+이 이미지를 분석해서 사진 속 물건의 이름이 무엇인지 파악해라.
+반드시 오직 다음 형태의 JSON 데이터로만 응답해라. 다른 설명이나 텍스트는 절대 포함하지 마라.
+{"item_name": "물건이름"}
+""".strip()
+
+
+def call_gemini(prompt: str, image_bytes: bytes, mime_type: str, api_key: str) -> tuple[dict, str, str]:
     payload = {
         "contents": [
             {
@@ -281,6 +423,54 @@ def call_gemini_image_analysis(image_bytes: bytes, mime_type: str) -> tuple[dict
     return parsed, raw_response, GEMINI_MODEL
 
 
+def call_gemini_image_analysis(image_bytes: bytes, mime_type: str) -> tuple[dict, str, str]:
+    api_key = read_env_value("GEMINI_API_KEY")
+    if not api_key:
+        mock_data = {
+            "items": [
+                {"sequence_no": 1, "item_name": "세제", "confidence": 0.95},
+                {"sequence_no": 2, "item_name": "수건", "confidence": 0.91},
+                {"sequence_no": 3, "item_name": "샴푸", "confidence": 0.88},
+                {"sequence_no": 4, "item_name": "휴지", "confidence": 0.85}
+            ]
+        }
+        return mock_data, json.dumps(mock_data), "mock-gemini-model"
+    return call_gemini(ITEM_LIST_PROMPT, image_bytes, mime_type, api_key)
+
+
+def call_gemini_item_name(image_bytes: bytes, mime_type: str) -> tuple[dict, str, str]:
+    api_key = os.environ.get("GEMINI_API_KEY") or read_env_value("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY가 설정되지 않았습니다. 환경변수 또는 .env 파일을 확인하세요.",
+        )
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(GEMINI_VISION_MODEL)
+
+    try:
+        response = model.generate_content(
+            [
+                WEB_INTAKE_PROMPT,
+                {"mime_type": mime_type or "image/jpeg", "data": image_bytes},
+            ],
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini API request failed: {exc}") from exc
+
+    text = (getattr(response, "text", None) or "").strip()
+    if not text:
+        raise HTTPException(status_code=502, detail="Gemini returned empty text")
+
+    parsed = extract_json_object(text)
+    return parsed, text, GEMINI_VISION_MODEL
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -323,6 +513,126 @@ def ensure_location(conn: sqlite3.Connection, drawer_number: int) -> sqlite3.Row
         "SELECT * FROM storage_location WHERE name = ?",
         (location_name,),
     ).fetchone()
+
+
+def get_latest_drawer_number_from_sensors(conn: sqlite3.Connection) -> Optional[int]:
+    """아두이노 센서가 적재한 가장 최근 서랍 번호를 조회한다 (storage_event -> drawer_camera_snapshot -> placement_verification 순)."""
+    event = conn.execute(
+        "SELECT drawer_number FROM storage_event WHERE drawer_number IS NOT NULL ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if event and event["drawer_number"]:
+        return event["drawer_number"]
+
+    snapshot = conn.execute(
+        "SELECT drawer_number FROM drawer_camera_snapshot WHERE drawer_number IS NOT NULL ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if snapshot and snapshot["drawer_number"]:
+        return snapshot["drawer_number"]
+
+    verification = conn.execute(
+        """
+        SELECT storage_location.drawer_number AS drawer_number
+        FROM placement_verification
+        JOIN storage_location ON storage_location.id = placement_verification.storage_location_id
+        ORDER BY placement_verification.id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if verification and verification["drawer_number"]:
+        return verification["drawer_number"]
+
+    return None
+
+
+# Gemini 분석 결과를 아두이노 센서 확인 전까지 잠시 들고 있는 상태.
+# (is_temi_linked과 같은 단순 전역 플래그 패턴 - 한 번에 하나의 수납만 진행한다고 가정)
+pending_intake_item_name: Optional[str] = None
+pending_intake_image_path: Optional[str] = None
+pending_intake_llm_model: Optional[str] = None
+
+
+@app.post("/api/web-intake/photo", status_code=201)
+async def web_intake_photo(image: UploadFile = File(...)) -> dict:
+    global pending_intake_item_name, pending_intake_image_path, pending_intake_llm_model
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="image must not be empty")
+
+    mime_type = image.content_type or "image/jpeg"
+    if not mime_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="image must be an image file")
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    extension = Path(image.filename or "").suffix.lower()
+    if extension not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+        extension = ".jpg"
+    image_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{extension}"
+    image_path.write_bytes(image_bytes)
+
+    # 1) Gemini 사진 분석을 먼저 끝까지 완료한다 (아두이노 센서 상태와 무관하게 항상 실행).
+    parsed, raw_response, llm_model = call_gemini_item_name(image_bytes, mime_type)
+
+    item_name = str(parsed.get("item_name", "")).strip()
+    if not item_name:
+        raise HTTPException(status_code=502, detail="Gemini가 물건 이름을 인식하지 못했습니다.")
+
+    # 2) 분석 결과를 보관해두고, 서랍 번호는 아두이노 센서가 보고할 때까지 기다린다 (여기서는 실패시키지 않는다).
+    pending_intake_item_name = item_name
+    pending_intake_image_path = str(image_path)
+    pending_intake_llm_model = llm_model
+
+    return {
+        "status": "waiting_for_drawer_sensor",
+        "item_name": item_name,
+        "llm_model": llm_model,
+        "image_path": str(image_path),
+    }
+
+
+@app.get("/api/web-intake/drawer-status")
+def web_intake_drawer_status() -> dict:
+    global pending_intake_item_name, pending_intake_image_path, pending_intake_llm_model
+
+    if pending_intake_item_name is None:
+        return {"status": "idle"}
+
+    with connect() as conn:
+        drawer_number = get_latest_drawer_number_from_sensors(conn)
+        if drawer_number is None:
+            return {"status": "waiting", "item_name": pending_intake_item_name}
+
+        item_id = ensure_item(conn, pending_intake_item_name)
+        location = ensure_location(conn, drawer_number)
+        conn.execute(
+            """
+            INSERT INTO item_placement(item_id, storage_location_id, quantity)
+            VALUES (?, ?, 1)
+            ON CONFLICT(item_id, storage_location_id)
+            DO UPDATE SET quantity = quantity + 1,
+                          last_checked_at = CURRENT_TIMESTAMP
+            """,
+            (item_id, location["id"]),
+        )
+        quantity = conn.execute(
+            "SELECT quantity FROM item_placement WHERE item_id = ? AND storage_location_id = ?",
+            (item_id, location["id"]),
+        ).fetchone()["quantity"]
+
+    result = {
+        "status": "done",
+        "item_name": pending_intake_item_name,
+        "drawer_number": drawer_number,
+        "quantity": quantity,
+        "llm_model": pending_intake_llm_model,
+        "image_path": pending_intake_image_path,
+    }
+
+    pending_intake_item_name = None
+    pending_intake_image_path = None
+    pending_intake_llm_model = None
+
+    return result
 
 
 def migrate_storage_schema(conn: sqlite3.Connection) -> None:
@@ -916,6 +1226,18 @@ def create_storage_event(event: StorageEventCreate) -> dict:
     return {"id": cursor.lastrowid}
 
 
+@app.get("/api/storage-events/latest")
+def get_latest_storage_event() -> dict:
+    with connect() as conn:
+        event = require_row(
+            conn,
+            "SELECT * FROM storage_event ORDER BY id DESC LIMIT 1",
+            (),
+            "No storage event recorded yet",
+        )
+    return row_dict(event)
+
+
 @app.post("/api/drawer-camera-snapshots", status_code=201)
 def create_drawer_camera_snapshot(snapshot: DrawerCameraSnapshotCreate) -> dict:
     with connect() as conn:
@@ -940,6 +1262,18 @@ def create_drawer_camera_snapshot(snapshot: DrawerCameraSnapshotCreate) -> dict:
             ),
         )
     return {"id": cursor.lastrowid}
+
+
+@app.get("/api/drawer-camera-snapshots/latest")
+def get_latest_drawer_camera_snapshot() -> dict:
+    with connect() as conn:
+        snapshot = require_row(
+            conn,
+            "SELECT * FROM drawer_camera_snapshot ORDER BY id DESC LIMIT 1",
+            (),
+            "No drawer camera snapshot recorded yet",
+        )
+    return row_dict(snapshot)
 
 
 @app.post("/api/placement-verifications", status_code=201)
@@ -1035,6 +1369,24 @@ def create_placement_verification(verification: PlacementVerificationCreate) -> 
         "storage_location_id": location["id"],
         "result": verification.result,
     }
+
+
+@app.get("/api/placement-verifications/latest")
+def get_latest_placement_verification() -> dict:
+    with connect() as conn:
+        verification = require_row(
+            conn,
+            """
+            SELECT placement_verification.*, storage_location.drawer_number AS drawer_number
+            FROM placement_verification
+            JOIN storage_location ON storage_location.id = placement_verification.storage_location_id
+            ORDER BY placement_verification.id DESC
+            LIMIT 1
+            """,
+            (),
+            "No placement verification recorded yet",
+        )
+    return row_dict(verification)
 
 
 @app.post("/api/shopping-sessions", status_code=201)

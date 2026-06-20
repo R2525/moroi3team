@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
@@ -22,6 +23,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ShoppingListActivity"
+            android:exported="false" />
+
+        <!-- Temi 음성("Temi야~ 칫솔 4개 사야해") 인식을 우리 앱이 직접 받기 위해
+             Temi 기본 대화/STT/NLU 레이어를 끄고 키오스크 모드로 동작시킨다. -->
+        <meta-data android:name="com.robotemi.sdk.metadata_kiosk" android:value="true" />
+        <meta-data android:name="com.robotemi.sdk.metadata_override_stt" android:value="true" />
+        <meta-data android:name="com.robotemi.sdk.metadata_override_nlu" android:value="true" />
+        <meta-data android:name="com.robotemi.sdk.metadata_override_conversation_layer" android:value="true" />
     </application>
 
 </manifest>

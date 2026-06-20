@@ -7,8 +7,17 @@ conn = sqlite3.connect('api_server/inventory.db')
 conn.execute("DELETE FROM shopping_list WHERE name IN ('apple', 'kiwi')")
 
 # category 컬럼 제거
-conn.execute("ALTER TABLE item DROP COLUMN category")
-conn.execute("ALTER TABLE shopping_list DROP COLUMN category")
+try:
+    conn.execute("ALTER TABLE item DROP COLUMN category")
+except sqlite3.OperationalError as e:
+    if "no such column" not in str(e).lower():
+        raise
+
+try:
+    conn.execute("ALTER TABLE shopping_list DROP COLUMN category")
+except sqlite3.OperationalError as e:
+    if "no such column" not in str(e).lower():
+        raise
 
 conn.commit()
 
