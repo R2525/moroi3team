@@ -11,7 +11,7 @@ import org.json.JSONObject;
 
 public class TemiDbHelper extends SQLiteOpenHelper {
     private static final String DB_NAME = "temi_local.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
 
     public TemiDbHelper(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -64,17 +64,31 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 "drawer_number INTEGER NOT NULL DEFAULT 0," +
                 "status TEXT NOT NULL DEFAULT 'pending'," +
                 "updated_at INTEGER NOT NULL)");
+        createShoppingTables(db);
     }
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion >= 2 && oldVersion < 3) {
+            createShoppingTables(db);
+            return;
+        }
         db.execSQL("DROP TABLE IF EXISTS placement_items");
         db.execSQL("DROP TABLE IF EXISTS placement_batches");
+        db.execSQL("DROP TABLE IF EXISTS shopping_items");
         db.execSQL("DROP TABLE IF EXISTS photo_uploads");
         db.execSQL("DROP TABLE IF EXISTS drawer_events");
         db.execSQL("DROP TABLE IF EXISTS storage_sessions");
         db.execSQL("DROP TABLE IF EXISTS items");
         onCreate(db);
+    }
+
+    private void createShoppingTables(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS shopping_items (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "item_name TEXT NOT NULL," +
+                "quantity INTEGER NOT NULL DEFAULT 1," +
+                "created_at INTEGER NOT NULL)");
     }
 
     public synchronized JSONObject health() throws JSONException {
@@ -136,6 +150,50 @@ public class TemiDbHelper extends SQLiteOpenHelper {
     public synchronized boolean deleteItemByName(String name) {
         SQLiteDatabase db = getWritableDatabase();
         return db.delete("items", "name = ?", new String[]{name}) > 0;
+    }
+
+    public synchronized JSONObject saveShoppingItem(String itemName, int quantity) throws JSONException {
+        long now = System.currentTimeMillis();
+        SQLiteDatabase db = getWritableDatabase();
+        db.execSQL(
+                "INSERT INTO shopping_items(item_name, quantity, created_at) VALUES(?, ?, ?)",
+                new Object[]{itemName, Math.max(1, quantity), now});
+        JSONObject result = new JSONObject();
+        result.put("saved", true);
+        result.put("id", getLastInsertId(db));
+        result.put("items", listShoppingItems());
+        return result;
+    }
+
+    public synchronized JSONArray listShoppingItems() throws JSONException {
+        SQLiteDatabase db = getReadableDatabase();
+        Cursor cursor = db.rawQuery(
+                "SELECT id, item_name, quantity, created_at FROM shopping_items ORDER BY id ASC",
+                new String[]{});
+        JSONArray items = new JSONArray();
+        try {
+            while (cursor.moveToNext()) {
+                JSONObject item = new JSONObject();
+                item.put("id", cursor.getInt(cursor.getColumnIndexOrThrow("id")));
+                item.put("item_name", cursor.getString(cursor.getColumnIndexOrThrow("item_name")));
+                item.put("quantity", cursor.getInt(cursor.getColumnIndexOrThrow("quantity")));
+                item.put("created_at", cursor.getLong(cursor.getColumnIndexOrThrow("created_at")));
+                items.put(item);
+            }
+        } finally {
+            cursor.close();
+        }
+        return items;
+    }
+
+    public synchronized boolean deleteShoppingItem(int id) {
+        SQLiteDatabase db = getWritableDatabase();
+        return db.delete("shopping_items", "id = ?", new String[]{String.valueOf(id)}) > 0;
+    }
+
+    public synchronized void clearShoppingItems() {
+        SQLiteDatabase db = getWritableDatabase();
+        db.delete("shopping_items", null, null);
     }
 
     public synchronized JSONObject startStorageSession(String itemName, int drawerNumber, int quantity) throws JSONException {

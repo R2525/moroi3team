@@ -25,15 +25,24 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
 import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.common.BitMatrix;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PAGE_HOME = "HOME";
@@ -47,10 +56,13 @@ public class MainActivity extends AppCompatActivity {
     private static final String PAGE_COMPLETE = "COMPLETE";
     private static final String PAGE_SETTINGS = "SETTINGS";
     private static final String PAGE_LOG = "LOG";
+    private static final String PAGE_SHOPPING_LIST = "SHOPPING_LIST";
 
     private static final String PREFS_NAME = "temi_settings";
     private static final String PREF_API_KEY = "gemini_api_key";
     private static final String PREF_PUBLIC_IP = "public_ip_override";
+    private static final String PREF_SHOPPING_API_BASE_URL = "shopping_api_base_url";
+    private static final String DEFAULT_EMULATOR_SHOPPING_API_BASE_URL = "http://10.0.2.2:8080";
 
     private FrameLayout pageRoot;
     private TemiDbHelper localDb;
@@ -137,10 +149,33 @@ public class MainActivity extends AppCompatActivity {
         currentPage = PAGE_HOME;
 
         LinearLayout page = basePage(K.HOME_TITLE, false);
+        if (useHomeGridLayout()) {
+            LinearLayout row1 = homeGridRow(page);
+            addNavGridCard(row1, K.FIND_CARD_TITLE, "\uBB3C\uAC74 \uC774\uB984\uC73C\uB85C \uC11C\uB78D \uC704\uCE58\uB97C \uAC80\uC0C9\uD569\uB2C8\uB2E4.", v -> showFindPage());
+            addNavGridCard(row1, K.REGISTER_CARD_TITLE, "\uBB3C\uAC74\uBA85\uACFC \uC11C\uB78D \uC704\uCE58\uB97C \uC9C1\uC811 \uB4F1\uB85D\uD569\uB2C8\uB2E4.", v -> showRegisterPage());
+
+            LinearLayout row2 = homeGridRow(page);
+            addNavGridCard(row2, K.UPLOAD_CARD_TITLE, "\uD734\uB300\uD3F0\uC73C\uB85C QR\uC744 \uC2A4\uCE94\uD574 \uC0AC\uC9C4\uC73C\uB85C \uC218\uB0A9\uD569\uB2C8\uB2E4.", v -> showUploadPage());
+            addNavGridCard(row2, "\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30", "\uC0B4 \uBB3C\uAC74\uACFC \uC218\uB7C9\uC744 home_temi \uC548\uC5D0\uC11C \uB9CC\uB4ED\uB2C8\uB2E4.", v -> showShoppingListPage());
+
+            LinearLayout row3 = homeGridRow(page);
+            addNavGridCard(row3, "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", "home_temi\uC5D0\uC11C \uB9CC\uB4E0 \uB9AC\uC2A4\uD2B8\uB85C QR\uC744 \uC0DD\uC131\uD569\uB2C8\uB2E4.", v -> showShoppingQrPage());
+            addNavGridCard(row3, K.DB_STATUS_CARD_TITLE, "\uC11C\uBC84\uC640 DB \uC5F0\uACB0 \uC0C1\uD0DC\uB97C \uD655\uC778\uD569\uB2C8\uB2E4.", v -> checkDbStatus());
+
+            LinearLayout row4 = homeGridRow(page);
+            addNavGridCard(row4, "\uC124\uC815", "API \uD0A4\uC640 \uC811\uC18D IP\uB97C \uC124\uC815\uD569\uB2C8\uB2E4.", v -> showSettings());
+            addGridSpacer(row4);
+
+            setPage(page);
+            startHomeBatchWatch();
+            return;
+        }
         page.addView(text("서랍 속 물건을 찾고 등록·수납하며 DB 상태를 확인합니다.", 26, "#657574", false), matchWrap(0, 18));
         addNavCard(page, K.FIND_CARD_TITLE, "물건 이름으로 어느 서랍에 있는지 검색합니다.", v -> showFindPage());
         addNavCard(page, K.REGISTER_CARD_TITLE, "물건명과 서랍 위치를 직접 등록합니다.", v -> showRegisterPage());
         addNavCard(page, K.UPLOAD_CARD_TITLE, "휴대폰으로 QR을 찍어 사진으로 수납합니다.", v -> showUploadPage());
+        addNavCard(page, "\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30", "\uC0B4 \uBB3C\uAC74\uACFC \uC218\uB7C9\uC744 home_temi \uC548\uC5D0\uC11C \uC9C1\uC811 \uB9CC\uB4ED\uB2C8\uB2E4.", v -> showShoppingListPage());
+        addNavCard(page, "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", "home_temi\uC5D0\uC11C \uB9CC\uB4E0 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uB85C QR\uC744 \uC0DD\uC131\uD569\uB2C8\uB2E4.", v -> showShoppingQrPage());
         addNavCard(page, K.DB_STATUS_CARD_TITLE, "Temi가 서버·DB에 연결됐는지 확인합니다.", v -> checkDbStatus());
         addNavCard(page, "설정", "API 키·외부 접속 IP 등을 설정합니다.", v -> showSettings());
         setPage(page);
@@ -331,6 +366,86 @@ public class MainActivity extends AppCompatActivity {
         return localServerUrl;
     }
 
+    private void showShoppingListPage() {
+        currentPage = PAGE_SHOPPING_LIST;
+
+        LinearLayout page = basePage("\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30", true);
+        LinearLayout form = card(page);
+        form.addView(text("\uBB3C\uD488 \uCD94\uAC00", 26, "#657184", true));
+
+        EditText itemNameInput = input("\uBB3C\uD488\uBA85");
+        EditText quantityInput = input("\uC218\uB7C9");
+        quantityInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        form.addView(itemNameInput, matchHeight(76, 12, 8));
+        form.addView(quantityInput, matchHeight(76, 0, 12));
+        addButton(form, "\uCD94\uAC00", true, v -> addShoppingListItem(itemNameInput, quantityInput));
+
+        LinearLayout listCard = card(page);
+        listCard.addView(text("\uD604\uC7AC \uC1FC\uD551\uB9AC\uC2A4\uD2B8", 26, "#657184", true));
+        try {
+            JSONArray items = localDb.listShoppingItems();
+            if (items.length() == 0) {
+                listCard.addView(text("\uC544\uC9C1 \uCD94\uAC00\uB41C \uBB3C\uD488\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", 26, "#657184", false));
+            } else {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject item = items.optJSONObject(i);
+                    if (item != null) {
+                        addShoppingListRow(listCard, item);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            listCard.addView(text(e.getMessage(), 24, "#B42318", true));
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "\uC804\uCCB4 \uC0AD\uC81C", false, v -> {
+            localDb.clearShoppingItems();
+            showShoppingListPage();
+        });
+        addButton(row, "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", true, v -> showShoppingQrPage());
+        setPage(page);
+    }
+
+    private void addShoppingListItem(EditText itemNameInput, EditText quantityInput) {
+        String itemName = itemNameInput.getText().toString().trim();
+        int quantity = parseIntOrDefault(quantityInput.getText().toString(), 1);
+        if (itemName.length() == 0) {
+            toast("\uBB3C\uD488\uBA85\uC744 \uC785\uB825\uD558\uC138\uC694.");
+            return;
+        }
+        try {
+            localDb.saveShoppingItem(itemName, Math.max(1, quantity));
+            showShoppingListPage();
+        } catch (Exception e) {
+            showSimpleError("\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uC800\uC7A5 \uC2E4\uD328", e.getMessage());
+        }
+    }
+
+    private void addShoppingListRow(LinearLayout parent, JSONObject item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(12), 0, 0);
+
+        String title = item.optString("item_name") + "  \u00B7  " + item.optInt("quantity", 1) + "\uAC1C";
+        row.addView(text(title, 28, "#17202A", true), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+        Button delete = new Button(this);
+        delete.setText("\uC0AD\uC81C");
+        delete.setAllCaps(false);
+        delete.setTextSize(16);
+        delete.setTextColor(Color.parseColor("#B42318"));
+        delete.setBackground(bg("#FFFFFF", "#E5B7B0", 8));
+        int id = item.optInt("id");
+        delete.setOnClickListener(v -> {
+            localDb.deleteShoppingItem(id);
+            showShoppingListPage();
+        });
+        row.addView(delete, new LinearLayout.LayoutParams(dp(110), dp(56)));
+        parent.addView(row);
+    }
+
     private void showLoading(String keyword) {
         currentPage = PAGE_RESULT;
         LinearLayout page = basePage(K.LOADING_TITLE, true);
@@ -396,11 +511,11 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
         localServerUrl = localServer.getBaseUrl();
-        String uploadUrl = publicIp.isEmpty() ? localServerUrl + "/upload" : "http://" + publicIp + ":" + TemiLocalServer.PORT + "/upload";
+        String uploadUrl = publicIp.isEmpty() ? localServerUrl + "/upload-qr" : "http://" + publicIp + ":" + TemiLocalServer.PORT + "/upload-qr";
 
         LinearLayout page = basePage(K.UPLOAD_TITLE, true);
         LinearLayout resultCard = card(page);
-        TextView headline = text(K.UPLOAD_GUIDE, 32, "#17202A", true);
+        TextView headline = text("\uC774 QR\uC744 \uC2A4\uCE94\uD558\uBA74 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C QR \uC774\uBBF8\uC9C0\uB97C \uB2E4\uC6B4\uB85C\uB4DC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.", 32, "#17202A", true);
         resultCard.addView(headline);
         addInfoRow(resultCard, K.ADDRESS_LABEL, uploadUrl);
 
@@ -725,17 +840,24 @@ public class MainActivity extends AppCompatActivity {
         EditText ipInput = input("PC LAN IP 입력 (예: 172.17.67.17)");
         ipInput.setText(currentIp);
         settingsCard.addView(ipInput, matchHeight(76, 18, 6));
+        settingsCard.addView(text("\uC1FC\uD551 API \uC8FC\uC18C", 26, "#657184", true));
+        settingsCard.addView(text("\uC608: http://10.0.2.2:8080 \uB610\uB294 http://PC_LAN_IP:8080", 22, "#657184", false));
+        String currentShoppingApi = prefs.getString(PREF_SHOPPING_API_BASE_URL, "").trim();
+        EditText shoppingApiInput = input("http://10.0.2.2:8080");
+        shoppingApiInput.setText(currentShoppingApi);
+        settingsCard.addView(shoppingApiInput, matchHeight(76, 18, 6));
 
         LinearLayout row = horizontal(page);
         addButton(row, "초기화", false, v -> {
-            prefs.edit().remove(PREF_API_KEY).remove(PREF_PUBLIC_IP).apply();
+            prefs.edit().remove(PREF_API_KEY).remove(PREF_PUBLIC_IP).remove(PREF_SHOPPING_API_BASE_URL).apply();
             toast("설정을 초기화했습니다.");
             showSettings();
         });
         addButton(row, "저장", true, v -> {
             String key = keyInput.getText().toString().trim();
             String ip = ipInput.getText().toString().trim();
-            prefs.edit().putString(PREF_API_KEY, key).putString(PREF_PUBLIC_IP, ip).apply();
+            String shoppingApi = shoppingApiInput.getText().toString().trim();
+            prefs.edit().putString(PREF_API_KEY, key).putString(PREF_PUBLIC_IP, ip).putString(PREF_SHOPPING_API_BASE_URL, shoppingApi).apply();
             toast("설정을 저장했습니다.");
             showSettings();
         });
@@ -857,8 +979,188 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void showShoppingQrPage() {
+        currentPage = PAGE_RESULT;
+        showSimpleLoading("\uC1FC\uD551 QR \uC0DD\uC131 \uC911", "\uC11C\uBC84\uC5D0\uC11C \uCD5C\uC2E0 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uB97C \uAC00\uC838\uC624\uACE0 \uC788\uC2B5\uB2C8\uB2E4.");
+        new Thread(() -> {
+            try {
+                JSONObject payload = fetchShoppingQrPayload();
+                runOnUiThread(() -> showShoppingQrResult(payload));
+            } catch (Exception e) {
+                runOnUiThread(() -> showSimpleError("\uC1FC\uD551 QR \uC0DD\uC131 \uC2E4\uD328", e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void showShoppingQrResult(JSONObject payload) {
+        currentPage = PAGE_RESULT;
+        LinearLayout page = basePage("\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", true);
+        LinearLayout resultCard = card(page);
+        resultCard.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        JSONArray items = payload.optJSONArray("items");
+        int itemCount = items == null ? 0 : items.length();
+        if (itemCount == 0) {
+            resultCard.addView(text("\uC804\uB2EC\uD560 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.", 32, "#17202A", true));
+        } else {
+            String shareId = localServer.createShoppingQrShare(payload);
+            String pageUrl = shoppingQrShareBaseUrl() + "/shopping-qr?id=" + shareId;
+            resultCard.addView(text("이 QR을 휴대폰으로 스캔하면 브라우저가 열립니다. 브라우저에서 QR 이미지를 사진첩에 저장하세요.", 28, "#17202A", true));
+            addInfoRow(resultCard, "\uD488\uBAA9", itemCount + "\uAC1C");
+            addInfoRow(resultCard, "transfer_id", String.valueOf(payload.optInt("transfer_id", 0)));
+            addInfoRow(resultCard, "URL", pageUrl);
+            ImageView qrView = new ImageView(this);
+            qrView.setBackgroundColor(Color.WHITE);
+            qrView.setPadding(dp(16), dp(16), dp(16), dp(16));
+            try {
+                qrView.setImageBitmap(createQrBitmap(pageUrl, dp(520)));
+                resultCard.addView(qrView, new LinearLayout.LayoutParams(dp(560), dp(560)));
+            } catch (Exception e) {
+                resultCard.addView(text("\uC624\uB958: QR \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. " + e.getMessage(), 24, "#B42318", true));
+            }
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "\uC0C8\uB85C \uC0DD\uC131", true, v -> showShoppingQrPage());
+        addButton(row, K.HOME_BUTTON, false, v -> showHome());
+        setPage(page);
+    }
+
+    private String shoppingQrShareBaseUrl() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
+        localServerUrl = localServer.getBaseUrl();
+        return publicIp.isEmpty() ? localServerUrl : "http://" + publicIp + ":" + TemiLocalServer.PORT;
+    }
+
+    private JSONObject fetchShoppingQrPayload() throws Exception {
+        JSONArray sourceItems = localDb.listShoppingItems();
+        if (sourceItems.length() == 0) {
+            throw new Exception("\uBA3C\uC800 \uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30\uC5D0\uC11C \uBB3C\uD488\uC744 \uCD94\uAC00\uD558\uC138\uC694.");
+        }
+        return buildShoppingQrPayload(sourceItems);
+    }
+
+    private List<String> shoppingApiBaseCandidates() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        List<String> bases = new ArrayList<>();
+        String configured = prefs.getString(PREF_SHOPPING_API_BASE_URL, "").trim();
+        if (configured.length() > 0) {
+            bases.add(trimTrailingSlash(configured));
+        }
+        String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
+        if (publicIp.length() > 0) {
+            bases.add("http://" + publicIp + ":8080");
+            bases.add("http://" + publicIp + ":8000");
+        }
+        bases.add(DEFAULT_EMULATOR_SHOPPING_API_BASE_URL);
+        bases.add("http://10.0.2.2:8000");
+        bases.add("http://127.0.0.1:8080");
+        bases.add("http://127.0.0.1:8000");
+
+        List<String> unique = new ArrayList<>();
+        for (String base : bases) {
+            if (!unique.contains(base)) {
+                unique.add(base);
+            }
+        }
+        return unique;
+    }
+
+    private String trimTrailingSlash(String value) {
+        while (value.endsWith("/")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value;
+    }
+
+    private JSONObject requestShoppingJson(String baseUrl, String path) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(baseUrl + path);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(5000);
+            connection.setRequestProperty("Accept", "application/json");
+            int code = connection.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+            String body = readBody(stream);
+            if (code < 200 || code >= 300) {
+                throw new Exception(baseUrl + path + " HTTP " + code + " " + body);
+            }
+            return new JSONObject(body);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private String readBody(InputStream stream) throws Exception {
+        if (stream == null) {
+            return "";
+        }
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+        StringBuilder body = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            body.append(line);
+        }
+        reader.close();
+        return body.toString();
+    }
+
+    private JSONArray extractShoppingItems(JSONObject response) {
+        JSONArray items = response.optJSONArray("shopping_list");
+        if (items != null) {
+            return items;
+        }
+        items = response.optJSONArray("items");
+        if (items != null) {
+            return items;
+        }
+        return response.optJSONArray("shopping_lists");
+    }
+
+    private JSONObject buildShoppingQrPayload(JSONArray sourceItems) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("type", "temi_shopping_list");
+        payload.put("version", 1);
+
+        JSONArray items = new JSONArray();
+        int transferId = 0;
+        for (int i = 0; i < sourceItems.length(); i++) {
+            JSONObject source = sourceItems.optJSONObject(i);
+            if (source == null) {
+                continue;
+            }
+            if (source.has("is_bought") && source.optBoolean("is_bought", false)) {
+                continue;
+            }
+            String itemName = source.optString("item_name", source.optString("name", "")).trim();
+            if (itemName.length() == 0) {
+                continue;
+            }
+            transferId = Math.max(transferId, source.optInt("transfer_id",
+                    source.optInt("list_id", source.optInt("id", 0))));
+
+            JSONObject item = new JSONObject();
+            item.put("item_name", itemName);
+            item.put("quantity", Math.max(1, source.optInt("quantity", 1)));
+            item.put("in_stock", source.has("in_stock") ? source.optBoolean("in_stock", true) : true);
+            item.put("section", source.optString("section", source.optString("section_name", "Unknown")));
+            items.put(item);
+        }
+        payload.put("transfer_id", transferId);
+        payload.put("items", items);
+        return payload;
+    }
+
     private Bitmap createQrBitmap(String text, int size) throws Exception {
-        BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size);
+        Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+        hints.put(EncodeHintType.CHARACTER_SET, "UTF-8");
+        BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints);
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
         for (int x = 0; x < size; x++) {
             for (int y = 0; y < size; y++) {
@@ -1051,6 +1353,54 @@ public class MainActivity extends AppCompatActivity {
         card.addView(open, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)));
 
         parent.addView(card, matchWrap(0, 14));
+    }
+
+    private boolean useHomeGridLayout() {
+        return true;
+    }
+
+    private LinearLayout homeGridRow(LinearLayout parent) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        parent.addView(row, matchHeight(126, 0, 10));
+        return row;
+    }
+
+    private void addNavGridCard(LinearLayout parent, String title, String description, View.OnClickListener listener) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(18), dp(12), dp(18), dp(12));
+        card.setBackground(bg("#FFFFFF", "#D8E0DE", 8));
+
+        TextView titleView = text(title, 30, "#172322", true);
+        titleView.setSingleLine(true);
+        card.addView(titleView);
+
+        TextView descView = text(description, 20, "#657574", false);
+        descView.setMaxLines(2);
+        descView.setPadding(0, dp(2), 0, dp(6));
+        card.addView(descView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
+
+        Button open = new Button(this);
+        open.setText("\uC5F4\uAE30");
+        open.setAllCaps(false);
+        open.setTextSize(15);
+        open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        open.setTextColor(Color.WHITE);
+        open.setBackground(bg("#285E63", "#285E63", 8));
+        open.setOnClickListener(listener);
+        card.addView(open, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1);
+        params.setMargins(dp(6), 0, dp(6), 0);
+        parent.addView(card, params);
+    }
+
+    private void addGridSpacer(LinearLayout parent) {
+        View spacer = new View(this);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1);
+        params.setMargins(dp(6), 0, dp(6), 0);
+        parent.addView(spacer, params);
     }
 
     private void addButton(LinearLayout parent, String label, boolean primary, View.OnClickListener listener) {

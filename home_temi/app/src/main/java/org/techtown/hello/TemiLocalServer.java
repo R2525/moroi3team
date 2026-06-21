@@ -1,8 +1,15 @@
 package org.techtown.hello;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.net.wifi.WifiManager;
 import android.text.format.Formatter;
+
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
+import com.google.zxing.MultiFormatWriter;
+import com.google.zxing.common.BitMatrix;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -17,9 +24,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TemiLocalServer {
     public static final int PORT = 8088;
@@ -29,6 +38,7 @@ public class TemiLocalServer {
     private final Context context;
     private final TemiDbHelper db;
     private final GeminiPhotoAnalyzer analyzer;
+    private final Map<String, String> shoppingQrPayloads = new ConcurrentHashMap<>();
     private ServerSocket serverSocket;
     private volatile boolean running;
 
@@ -76,6 +86,12 @@ public class TemiLocalServer {
 
     public String getBaseUrl() {
         return "http://" + getLocalIpAddress() + ":" + PORT;
+    }
+
+    public String createShoppingQrShare(JSONObject payload) {
+        String id = UUID.randomUUID().toString();
+        shoppingQrPayloads.put(id, payload.toString());
+        return id;
     }
 
     private synchronized void addSensorLog(JSONObject body) {
@@ -126,8 +142,16 @@ public class TemiLocalServer {
                 writeHtml(socket, uploadPage());
             } else if ("GET".equals(request.method) && "/upload".equals(path)) {
                 writeHtml(socket, uploadPage());
+            } else if ("GET".equals(request.method) && "/upload-qr".equals(path)) {
+                writeHtml(socket, uploadQrPage(requestBaseUrl(request)));
+            } else if ("GET".equals(request.method) && "/upload-qr.png".equals(path)) {
+                writeUploadQrPng(socket, requestBaseUrl(request));
             } else if ("GET".equals(request.method) && "/api/health".equals(path)) {
                 writeJson(socket, 200, db.health());
+            } else if ("GET".equals(request.method) && "/shopping-qr".equals(path)) {
+                writeHtml(socket, shoppingQrPage(valueOrEmpty(request.query.get("id"))));
+            } else if ("GET".equals(request.method) && "/shopping-qr.png".equals(path)) {
+                writeShoppingQrPng(socket, valueOrEmpty(request.query.get("id")));
             } else if ("GET".equals(request.method) && "/api/items".equals(path)) {
                 writeJson(socket, 200, new JSONObject().put("items", db.listItems()));
             } else if ("GET".equals(request.method) && "/api/items/search".equals(path)) {
@@ -459,6 +483,114 @@ public class TemiLocalServer {
                 + "<script>" + js + "</script></body></html>";
     }
 
+    private String uploadQrPage(String baseUrl) {
+        String uploadUrl = baseUrl + "/upload";
+        String imageUrl = "/upload-qr.png";
+        return "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<title>Temi Upload QR</title><style>" + mobilePageCss()
+                + ".qr{display:block;width:100%;max-width:360px;margin:18px auto;background:#fff;border:1px solid #d7dee8;border-radius:8px;padding:14px;box-sizing:border-box}"
+                + ".primary{display:block;text-align:center;background:#1e40af;color:white;text-decoration:none;border-radius:8px;padding:15px;font-size:18px;font-weight:700;margin:12px 0}"
+                + ".secondary{display:block;text-align:center;background:#fff;color:#17202a;text-decoration:none;border:1px solid #d7dee8;border-radius:8px;padding:13px;font-size:16px;margin:10px 0}"
+                + ".url{word-break:break-all;background:#fff;border:1px solid #d7dee8;border-radius:8px;padding:12px;font-size:14px;color:#475569}</style></head><body>"
+                + "<h1>\uC0AC\uC9C4 \uC218\uB0A9 QR</h1>"
+                + "<p>\uC544\uB798 QR \uC774\uBBF8\uC9C0\uB97C \uB2E4\uC6B4\uB85C\uB4DC\uD574 \uC0AC\uC9C4\uCCA9\uC5D0 \uC800\uC7A5\uD558\uACE0, \uD544\uC694\uD560 \uB54C \uC2A4\uCE94\uD574 \uC5C5\uB85C\uB4DC \uD398\uC774\uC9C0\uB97C \uC5EC\uC138\uC694.</p>"
+                + "<img class='qr' src='" + imageUrl + "' alt='Temi upload QR'>"
+                + "<a class='primary' href='" + imageUrl + "' download='temi-upload-qr.png'>\uC774\uBBF8\uC9C0 \uB2E4\uC6B4\uB85C\uB4DC</a>"
+                + "<a class='secondary' href='" + escapeHtml(uploadUrl) + "'>\uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C \uC5C5\uB85C\uB4DC \uD398\uC774\uC9C0 \uC5F4\uAE30</a>"
+                + "<div class='url'>" + escapeHtml(uploadUrl) + "</div>"
+                + "</body></html>";
+    }
+
+    private void writeUploadQrPng(Socket socket, String baseUrl) throws Exception {
+        Bitmap bitmap = createQrBitmap(baseUrl + "/upload", 900);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
+        byte[] bytes = output.toByteArray();
+        writeRaw(socket, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Disposition: attachment; filename=\"temi-upload-qr.png\"\r\nContent-Length: "
+                + bytes.length + "\r\nConnection: close\r\n\r\n", bytes);
+    }
+
+    private String shoppingQrPage(String id) {
+        String payload = shoppingQrPayloads.get(id);
+        if (payload == null) {
+            return "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    + "<title>Shopping QR</title><style>" + mobilePageCss() + "</style></head><body>"
+                    + "<h1>쇼핑 QR을 찾을 수 없습니다</h1>"
+                    + "<p>Temi에서 쇼핑 QR을 다시 생성한 뒤 QR을 다시 스캔해주세요.</p>"
+                    + "</body></html>";
+        }
+
+        JSONArray items = new JSONArray();
+        try {
+            JSONObject json = new JSONObject(payload);
+            JSONArray source = json.optJSONArray("items");
+            if (source != null) {
+                items = source;
+            }
+        } catch (Exception ignored) {
+        }
+
+        String imageUrl = "/shopping-qr.png?id=" + escapeHtml(id);
+        StringBuilder rows = new StringBuilder();
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            rows.append("<li>")
+                    .append(escapeHtml(item.optString("item_name", "")))
+                    .append(" <span>")
+                    .append(Math.max(1, item.optInt("quantity", 1)))
+                    .append("개</span></li>");
+        }
+
+        return "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<title>Temi Shopping QR</title><style>" + mobilePageCss()
+                + ".qr{display:block;width:100%;max-width:360px;margin:18px auto;background:#fff;border:1px solid #d7dee8;border-radius:8px;padding:14px;box-sizing:border-box}"
+                + ".primary{display:block;text-align:center;background:#1e40af;color:white;text-decoration:none;border-radius:8px;padding:15px;font-size:18px;font-weight:700;margin:12px 0}"
+                + ".secondary{display:block;text-align:center;background:#fff;color:#17202a;text-decoration:none;border:1px solid #d7dee8;border-radius:8px;padding:13px;font-size:16px;margin:10px 0}"
+                + "ul{padding-left:20px}li{margin:8px 0;font-size:16px}span{color:#657184}</style></head><body>"
+                + "<h1>매장 Temi에 보여줄 쇼핑 QR</h1>"
+                + "<p>아래 QR 이미지를 사진첩에 저장한 뒤 매장 Temi에 보여주세요.</p>"
+                + "<img class='qr' src='" + imageUrl + "' alt='쇼핑 QR'>"
+                + "<a class='primary' href='" + imageUrl + "' download='temi-shopping-qr.png'>사진첩에 저장</a>"
+                + "<a class='secondary' href='" + imageUrl + "' target='_blank'>QR 이미지만 열기</a>"
+                + "<h2>품목 " + items.length() + "개</h2><ul>" + rows + "</ul>"
+                + "</body></html>";
+    }
+
+    private String mobilePageCss() {
+        return "body{font-family:sans-serif;padding:22px;background:#f5f7fa;color:#17202a;max-width:520px;margin:0 auto}"
+                + "h1{font-size:24px;margin:8px 0 12px}h2{font-size:18px;margin-top:24px}p{font-size:17px;line-height:1.5;color:#475569}";
+    }
+
+    private void writeShoppingQrPng(Socket socket, String id) throws Exception {
+        String payload = shoppingQrPayloads.get(id);
+        if (payload == null) {
+            writeJson(socket, 404, new JSONObject().put("error", "shopping qr not found"));
+            return;
+        }
+        Bitmap bitmap = createQrBitmap(payload, 900);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
+        byte[] bytes = output.toByteArray();
+        writeRaw(socket, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Disposition: attachment; filename=\"temi-shopping-qr.png\"\r\nContent-Length: "
+                + bytes.length + "\r\nConnection: close\r\n\r\n", bytes);
+    }
+
+    private Bitmap createQrBitmap(String text, int size) throws Exception {
+        Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+        hints.put(EncodeHintType.CHARACTER_SET, "UTF-8");
+        BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+        for (int x = 0; x < size; x++) {
+            for (int y = 0; y < size; y++) {
+                bitmap.setPixel(x, y, matrix.get(x, y) ? Color.BLACK : Color.WHITE);
+            }
+        }
+        return bitmap;
+    }
+
     private void writeHtml(Socket socket, String html) throws Exception {
         byte[] bytes = html.getBytes("UTF-8");
         writeRaw(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: " + bytes.length + "\r\nConnection: close\r\n\r\n", bytes);
@@ -499,6 +631,14 @@ public class TemiLocalServer {
         } catch (Exception ignored) {
         }
         return "127.0.0.1";
+    }
+
+    private String requestBaseUrl(HttpRequest request) {
+        String host = request.headers.get("host");
+        if (host != null && host.trim().length() > 0) {
+            return "http://" + host.trim();
+        }
+        return getBaseUrl();
     }
 
     private String escapeHtml(String value) {
