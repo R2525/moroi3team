@@ -47,12 +47,12 @@ export TEMI_SERVER_URL="http://<Temi_IP>:8088"
 
 The drawer scenario uses this contract:
 - `GET /api/placement-batches/current` to read the active target. `current.item_name` and `current.drawer_number` are shown in the monitor for operator confirmation.
-- `POST /api/sensor-events` with `{"event_type":"VERIFY_SUCCESS"}` only when the camera sees a grab/closed-fist state, then an open/released-hand state, and the load-cell delta is at least `DRAWER_WEIGHT_THRESHOLD`.
+- `POST /api/sensor-events` with `{"event_type":"VERIFY_SUCCESS"}` only when at least one magnet sensor is `NOT_DETECTED`, the camera sees a hand, and the selected load-cell delta increases by at least `DRAWER_WEIGHT_THRESHOLD` (default `800`). When two or more magnet sensors are `NOT_DETECTED`, the app selects the not-detected sensor with the largest absolute load-cell delta.
 - `POST /api/sensor-events` with `{"event_type":"VERIFY_FAIL"}` when the verification step runs but either the hand-state check or the weight check failed.
 
-The camera model is not expected to identify the object itself. It only needs to classify the hand state as holding/grabbing (`fist`, `Closed_Fist`, `hand_grab`) or released/open (`open`, `Open_Palm`, `hand_open`). The load cell is the second confirmation that something was actually placed.
+The camera model is not expected to identify the object itself. It only needs to detect a hand state such as `fist`, `Closed_Fist`, `hand_grab`, `Open_Palm`, or `hand_open`. The load cell is the second confirmation that something was actually placed.
 
-The MCU sketch in `sketch/sketch.ino` already exposes `loadcell_read`, `loadcell_init`, `magnet_read`, and `magnet_raw_read` through RouterBridge. The Linux app reads those values and sends the Temi HTTP events; no PC serial bridge is required.
+The MCU sketch in `sketch/sketch.ino` exposes three HX711 load cells and three reed switches through RouterBridge. Compatibility methods `loadcell_read`, `magnet_read`, and `magnet_raw_read` return sensor 1; numbered methods such as `loadcell_read_2` and `magnet_read_3` return the other sensors. The Linux app reads all three values and uses sensor 1 for the existing Temi verification flow by default; set `PRIMARY_SENSOR_INDEX=2` or `3` to change the primary sensor. No PC serial bridge is required.
 
 ## Hand Gesture Recognition
 `python/main.py` can overlay ONNX hand landmarks, classify canned gestures, and exposes the current hand state in `/status`.
@@ -65,28 +65,34 @@ The Python `mediapipe` package is not used on this Arduino UNO Q image because `
 
 Recognized gesture labels are `None`, `Closed_Fist`, `Open_Palm`, `Pointing_Up`, `Thumb_Down`, `Thumb_Up`, `Victory`, and `ILoveYou`.
 
-The web UI exposes ONNX controls for switching `Hand` and `YOLO` on or off at runtime. Hand gesture recognition is the default priority, so `Hand` starts enabled and `YOLO` starts disabled unless overridden by environment variables.
+The web UI exposes ONNX controls for switching `Hand` and `YOLO` on or off at runtime. The QRB2210 default starts YOLO on the HTP/NPU path and leaves hand tracking disabled unless overridden by environment variables.
 
 Useful environment variables:
 - `HAND_TRACKING_ENABLED=1` starts hand gesture recognition enabled. The default is `0` on QRB2210 so the app starts on the YOLO HTP/NPU path instead of the older hand-tracking path.
 - `HAND_TRACKING_ENABLED=0` starts hand gesture recognition disabled.
 - `YOLO_ENABLED=1` starts YOLO enabled. This is the default for the QRB2210 HTP/NPU path.
-- `YOLO_MODEL=data/input/yolov8n.onnx` selects the default YOLO model for the HTP/NPU path.
-- `YOLO_BACKEND=qnn_htp` runs YOLO through ONNX Runtime QNN with the Qualcomm HTP/NPU backend. This is the default path and uses `/dev/fastrpc-adsp`.
+- `YOLO_MODEL=data/input/best_int8.tflite` selects the default YOLO model.
+- `YOLO_BACKEND=litert_cpu` runs YOLO through LiteRT/TFLite with XNNPACK. This is the default App Lab path for `best_int8.tflite`.
 - `ONNX_REQUIRE_QNN_ONLY=0` allows CPU EP fallback for unsupported graph nodes. This matches the previous working HTP/NPU app behavior.
-- `YOLO_BACKEND=litert_cpu YOLO_MODEL=data/input/best_int8.tflite` runs YOLO through LiteRT/TFLite on CPU with XNNPACK as a fallback.
+- `YOLO_BACKEND=qnn_htp YOLO_MODEL=data/input/yolov8n.onnx` runs the older ONNX model through ONNX Runtime QNN with the Qualcomm HTP/NPU backend.
 - `YOLO_THREADS=4` sets the LiteRT CPU thread count.
-- `YOLO_TARGET_FPS=0` lets YOLO run as fast as the model can execute. Set a positive value to throttle detection updates.
+- `YOLO_TARGET_FPS=0` lets YOLO run as fast as the model can execute.
+- `YOLO_INTERVAL=0` disables the extra pause between YOLO passes.
 - `YOLO_CONF=0.35` sets the YOLO confidence threshold. Raise it for fewer false positives, lower it if the fist/open model misses too many hands.
-- `TARGET_FPS=8` sets the camera capture loop rate. QRB2210 shares CPU between camera decode and inference, so this default favors YOLO throughput.
-- `TEMI_SERVER_URL=http://<Temi_IP>:8088` selects the Temi HTTP server. The default is `http://172.20.10.2:8088`; override it if the robot IP changes.
+- `TARGET_FPS=4` sets the camera capture loop rate. QRB2210 shares CPU between camera decode, inference, App Lab, and the desktop UI, so this default favors controllability.
+- `FRAME_WIDTH=320` and `FRAME_HEIGHT=240` set the default camera capture size.
+- `TEMI_SERVER_URL=http://<Temi_IP>:8088` selects the Temi HTTP server. The default is `http://10.34.255.29:8088`; override it if the robot IP changes.
 - `TEMI_REQUEST_TIMEOUT=5.0` limits each Temi HTTP request.
 - `TEMI_IDLE_POLL_INTERVAL=1.0` controls how often the app polls Temi for the current placement while idle.
-- `DRAWER_GRAB_LABELS=fist,closed_fist,closedfist,hand_grab,handgrab,grab,grabbing` maps camera labels that mean the hand is holding/grabbing.
-- `DRAWER_RELEASE_LABELS=open,open_palm,openpalm,hand_open,handopen,released,release` maps camera labels that mean the hand has opened/released.
-- `LOADCELL_SOURCE=auto` reads load cell and reed-switch magnet state through RouterBridge first, then `arduino-router-cli`, and only falls back to `/dev/ttyHS1` serial when the router socket is not present.
+- `DRAWER_VERIFY_WEIGHT_TIMEOUT=5.0` controls how long the app waits after seeing a hand for the load-cell delta to reach the threshold.
+- `DRAWER_WEIGHT_DIRECTION=up` requires the selected load cell to increase by the threshold. Use `either` only for debugging either-direction changes.
+- `DRAWER_WEIGHT_DIRECTIONS=down,up,up` overrides the direction per sensor. In this project sensor 1 counts placement as a negative delta, while sensors 2 and 3 count placement as a positive delta.
+- `DRAWER_GRAB_LABELS=fist,closed_fist,closedfist,hand_grab,handgrab,grab,grabbing` maps camera labels that should always count as hand detection. Labels containing `hand`, `fist`, or `palm` also count as hand detection.
+- `LOADCELL_SOURCE=auto` reads all three load cells and reed-switch magnet states through RouterBridge first, then `arduino-router-cli`, and only falls back to `/dev/ttyHS1` serial when the router socket is not present.
+- `PRIMARY_SENSOR_INDEX=1` selects which HX711/reed-switch pair drives the existing single-drawer verification logic. The status UI still shows all three sensors.
 - `ROUTER_CLI_TIMEOUT=1.0` limits each router RPC call so sensor issues do not block YOLO or the web server.
 - `DRAWER_MARKER_ENABLED=1` tracks a colored drawer marker from the camera for open-position verification.
+- `DRAWER_MARKER_INTERVAL=0.25` controls how often marker detection runs.
 - `DRAWER_MARKER_HSV_LOW=45,70,70` and `DRAWER_MARKER_HSV_HIGH=90,255,255` set the HSV color range. The default is a green marker.
 - `DRAWER_MARKER_AXIS=x` selects whether horizontal (`x`) or vertical (`y`) marker movement represents drawer travel.
 - `DRAWER_MARKER_CLOSED_POS=0.20` and `DRAWER_MARKER_OPEN_POS=0.80` calibrate the marker position as normalized image coordinates. Set these after observing `/status`.

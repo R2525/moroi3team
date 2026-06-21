@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Configure HY-WiFi for NetworkManager. HY-WiFi is treated as a WPA-Enterprise
+# network using PEAP/MSCHAPv2. Credentials can be supplied with environment
+# variables or a local .env.hy-wifi file:
+#   HY_WIFI_ID=...
+#   HY_WIFI_PASSWORD=...
 SSID="${HY_WIFI_SSID:-HY-WiFi}"
 CONNECTION_NAME="${HY_WIFI_CONNECTION:-HY-Wifi}"
 IDENTITY="${HY_WIFI_ID:-}"
@@ -9,6 +14,7 @@ WIFI_IFACE="${HY_WIFI_IFACE:-}"
 CA_CERT="${HY_WIFI_CA_CERT:-}"
 DOMAIN_SUFFIX_MATCH="${HY_WIFI_DOMAIN_SUFFIX_MATCH:-}"
 ANONYMOUS_IDENTITY="${HY_WIFI_ANON_ID:-}"
+CONNECT_NOW="${HY_WIFI_CONNECT_NOW:-1}"
 
 if [ -f ".env.hy-wifi" ]; then
   # shellcheck disable=SC1091
@@ -21,15 +27,7 @@ if [ -f ".env.hy-wifi" ]; then
   CA_CERT="${HY_WIFI_CA_CERT:-$CA_CERT}"
   DOMAIN_SUFFIX_MATCH="${HY_WIFI_DOMAIN_SUFFIX_MATCH:-$DOMAIN_SUFFIX_MATCH}"
   ANONYMOUS_IDENTITY="${HY_WIFI_ANON_ID:-$ANONYMOUS_IDENTITY}"
-fi
-
-if [ -z "$IDENTITY" ]; then
-  read -r -p "HY-Wifi ID: " IDENTITY
-fi
-
-if [ -z "$PASSWORD" ]; then
-  read -r -s -p "HY-Wifi password: " PASSWORD
-  echo
+  CONNECT_NOW="${HY_WIFI_CONNECT_NOW:-$CONNECT_NOW}"
 fi
 
 if [ -z "$WIFI_IFACE" ]; then
@@ -43,26 +41,51 @@ fi
 
 NMCLI=(nmcli)
 
-echo "Configuring $SSID on $WIFI_IFACE as $IDENTITY"
 "${NMCLI[@]}" radio wifi on
 
 if "${NMCLI[@]}" -t -f NAME connection show | grep -Fxq "$CONNECTION_NAME"; then
   echo "Updating existing connection: $CONNECTION_NAME"
 else
+  if [ -z "$IDENTITY" ] || [ -z "$PASSWORD" ]; then
+    echo "Missing HY-WiFi credentials. Set HY_WIFI_ID and HY_WIFI_PASSWORD, or create .env.hy-wifi." >&2
+    exit 1
+  fi
+
   echo "Creating connection: $CONNECTION_NAME"
   "${NMCLI[@]}" connection add type wifi ifname "$WIFI_IFACE" con-name "$CONNECTION_NAME" ssid "$SSID"
 fi
 
-"${NMCLI[@]}" connection modify "$CONNECTION_NAME" \
-  connection.autoconnect yes \
-  connection.autoconnect-priority 50 \
-  wifi.ssid "$SSID" \
-  wifi-sec.key-mgmt wpa-eap \
-  802-1x.eap peap \
-  802-1x.identity "$IDENTITY" \
-  802-1x.password "$PASSWORD" \
-  802-1x.password-flags 0 \
+MODIFY_ARGS=(
+  connection.autoconnect yes
+  connection.autoconnect-priority 100
+  wifi.ssid "$SSID"
+  wifi-sec.key-mgmt wpa-eap
+  802-1x.eap peap
   802-1x.phase2-auth mschapv2
+)
+
+if [ -n "$IDENTITY" ]; then
+  MODIFY_ARGS+=(802-1x.identity "$IDENTITY")
+fi
+
+if [ -n "$PASSWORD" ]; then
+  MODIFY_ARGS+=(
+    802-1x.password "$PASSWORD"
+    802-1x.password-flags 0
+  )
+fi
+
+"${NMCLI[@]}" connection modify "$CONNECTION_NAME" "${MODIFY_ARGS[@]}"
+
+if [ -n "$IDENTITY" ]; then
+  "${NMCLI[@]}" connection modify "$CONNECTION_NAME" 802-1x.identity "$IDENTITY"
+fi
+
+if [ -n "$PASSWORD" ]; then
+  "${NMCLI[@]}" connection modify "$CONNECTION_NAME" \
+    802-1x.password "$PASSWORD" \
+    802-1x.password-flags 0
+fi
 
 if [ -n "$ANONYMOUS_IDENTITY" ]; then
   "${NMCLI[@]}" connection modify "$CONNECTION_NAME" 802-1x.anonymous-identity "$ANONYMOUS_IDENTITY"
@@ -76,10 +99,14 @@ if [ -n "$CA_CERT" ]; then
     "${NMCLI[@]}" connection modify "$CONNECTION_NAME" 802-1x.domain-suffix-match "$DOMAIN_SUFFIX_MATCH"
   fi
 else
-  echo "Warning: no CA certificate configured for $SSID. Ask school IT for the CA certificate if login fails or certificate validation is required." >&2
+  echo "Warning: no CA certificate configured for $SSID. Ask IT for the CA certificate if login fails or certificate validation is required." >&2
   "${NMCLI[@]}" connection modify "$CONNECTION_NAME" 802-1x.system-ca-certs no
 fi
 
-echo "Connecting..."
-"${NMCLI[@]}" connection up "$CONNECTION_NAME"
-echo "Done. NetworkManager will autoconnect to $SSID on future boots."
+echo "Configured $SSID for NetworkManager autoconnect."
+
+if [ "$CONNECT_NOW" = "1" ]; then
+  echo "Connecting to $SSID..."
+  "${NMCLI[@]}" connection up "$CONNECTION_NAME"
+  echo "Done. NetworkManager will autoconnect to $SSID on future boots."
+fi

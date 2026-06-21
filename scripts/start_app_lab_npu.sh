@@ -41,12 +41,29 @@ block = """  main:
       APP_GROUPS: 20,29,44,991,1001,1000
       APP_GID: "1000"
       APP_UID: "1000"
-      CAMERA_DEVICE: auto
+      CAMERA_DEVICE: /dev/video9
+      DRAWER_LOOP_INTERVAL: "0.2"
+      DRAWER_MANUAL_ACTIVE: "0"
+      DRAWER_MANUAL_ITEM: manual-test
+      DRAWER_MANUAL_LABEL: first drawer
+      DRAWER_MANUAL_NUMBER: "1"
+      DRAWER_MARKER_INTERVAL: "0.25"
+      DRAWER_STORAGE_SESSION_ID: "1"
+      DRAWER_WEIGHT_THRESHOLD: "800"
+      DRAWER_WEIGHT_DIRECTION: up
+      DRAWER_WEIGHT_DIRECTIONS: down,up,up
+      FRAME_HEIGHT: "240"
+      FRAME_WIDTH: "320"
       NPU_DEVICE: /dev/fastrpc-adsp
       ONNX_REQUIRE_QNN_ONLY: "0"
+      TARGET_FPS: "8"
+      TEMI_SERVER_URL: http://10.34.255.29:8088
       WEB_PORT: "5001"
       YOLO_BACKEND: litert_cpu
+      YOLO_INTERVAL: "0"
       YOLO_MODEL: data/input/best_int8.tflite
+      YOLO_TARGET_FPS: "0"
+      YOLO_THREADS: "4"
 """
 
 text = path.read_text(encoding="utf-8") if path.exists() else "services:\n"
@@ -78,6 +95,9 @@ if not inserted:
     out = ["services:"] + block.rstrip("\n").splitlines() + lines[1:]
 
 text = "\n".join(out) + "\n"
+text = text.replace("VIDEO_DEVICE: /dev/video8", "VIDEO_DEVICE: /dev/video9")
+text = text.replace("CAMERA_DEVICE: /dev/video8", "CAMERA_DEVICE: /dev/video9")
+text = text.replace("CAMERA_DEVICE: auto", "CAMERA_DEVICE: /dev/video9")
 path.write_text(text, encoding="utf-8")
 print("Ensured NPU cgroup rule for main container.")
 PY

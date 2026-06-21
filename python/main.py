@@ -63,12 +63,12 @@ BAUD_RATE = int(os.environ.get("LOADCELL_BAUD", "115200"))
 WEB_PORT = int(os.environ.get("WEB_PORT", "5001"))
 ROUTER_CLI_TIMEOUT = float(os.environ.get("ROUTER_CLI_TIMEOUT", "1.0"))
 
-MODEL_PATH = os.environ.get("YOLO_MODEL", "data/input/yolov8n.onnx")
+MODEL_PATH = os.environ.get("YOLO_MODEL", "data/input/best_int8.tflite")
 CONF_THRESHOLD = float(os.environ.get("YOLO_CONF", "0.35"))
 NMS_THRESHOLD = float(os.environ.get("YOLO_NMS", "0.45"))
-YOLO_INTERVAL = float(os.environ.get("YOLO_INTERVAL", "0.0"))
+YOLO_INTERVAL = float(os.environ.get("YOLO_INTERVAL", "0"))
 YOLO_TARGET_FPS = float(os.environ.get("YOLO_TARGET_FPS", "0"))
-YOLO_BACKEND = os.environ.get("YOLO_BACKEND", "qnn_htp")
+YOLO_BACKEND = os.environ.get("YOLO_BACKEND", "litert_cpu")
 YOLO_THREADS = int(os.environ.get("YOLO_THREADS", "4"))
 YOLO_ENABLED_DEFAULT = os.environ.get("YOLO_ENABLED", "1").lower() not in {"0", "false", "no"}
 LOADCELL_SOURCE = os.environ.get("LOADCELL_SOURCE", "auto").lower()
@@ -94,26 +94,27 @@ HAND_YOLO_NMS = float(os.environ.get("HAND_YOLO_NMS", "0.45"))
 ONNX_REQUIRE_QNN_ONLY = os.environ.get("ONNX_REQUIRE_QNN_ONLY", "0").lower() not in {"0", "false", "no"}
 
 DRAWER_SCENARIO_ENABLED = os.environ.get("DRAWER_SCENARIO_ENABLED", "1").lower() not in {"0", "false", "no"}
+VALID_WEIGHT_DIRECTIONS = {"up", "down", "either"}
+DRAWER_WEIGHT_DIRECTION_DEFAULT = os.environ.get("DRAWER_WEIGHT_DIRECTION", "up").lower()
+if DRAWER_WEIGHT_DIRECTION_DEFAULT not in VALID_WEIGHT_DIRECTIONS:
+    DRAWER_WEIGHT_DIRECTION_DEFAULT = "up"
 TEMI_SERVER_URL = (
     os.environ.get("TEMI_SERVER_URL")
     or os.environ.get("DRAWER_SERVER_URL")
-    or "http://172.20.10.2:8088"
+    or "http://10.34.255.29:8088"
 ).rstrip("/")
 DRAWER_SERVER_URL = TEMI_SERVER_URL
 TEMI_REQUEST_TIMEOUT = float(os.environ.get("TEMI_REQUEST_TIMEOUT", "5.0"))
 TEMI_IDLE_POLL_INTERVAL = float(os.environ.get("TEMI_IDLE_POLL_INTERVAL", "1.0"))
-DRAWER_WEIGHT_THRESHOLD = float(os.environ.get("DRAWER_WEIGHT_THRESHOLD", "10.0"))
+DRAWER_WEIGHT_THRESHOLD = float(os.environ.get("DRAWER_WEIGHT_THRESHOLD", "800.0"))
+TEMI_SENSOR_EVENTS_PATH = "/api/sensor-events"
 DRAWER_GRAB_LABELS = {
     name.strip().lower()
     for name in os.environ.get("DRAWER_GRAB_LABELS", "fist,closed_fist,closedfist,hand_grab,handgrab,grab,grabbing").split(",")
     if name.strip()
 }
-DRAWER_RELEASE_LABELS = {
-    name.strip().lower()
-    for name in os.environ.get("DRAWER_RELEASE_LABELS", "open,open_palm,openpalm,hand_open,handopen,released,release").split(",")
-    if name.strip()
-}
-DRAWER_LOOP_INTERVAL = float(os.environ.get("DRAWER_LOOP_INTERVAL", "0.1"))
+DRAWER_LOOP_INTERVAL = float(os.environ.get("DRAWER_LOOP_INTERVAL", "0.2"))
+DRAWER_VERIFY_WEIGHT_TIMEOUT = float(os.environ.get("DRAWER_VERIFY_WEIGHT_TIMEOUT", "5.0"))
 DRAWER_MARKER_ENABLED = os.environ.get("DRAWER_MARKER_ENABLED", "1").lower() not in {"0", "false", "no"}
 DRAWER_MARKER_SECURITY_ENABLED = os.environ.get("DRAWER_MARKER_SECURITY_ENABLED", "1").lower() not in {"0", "false", "no"}
 DRAWER_MARKER_HSV_LOW = parse_csv_floats(os.environ.get("DRAWER_MARKER_HSV_LOW", "45,70,70"), 3, (45.0, 70.0, 70.0))
@@ -124,13 +125,38 @@ DRAWER_MARKER_CLOSED_POS = parse_optional_float(os.environ.get("DRAWER_MARKER_CL
 DRAWER_MARKER_OPEN_POS = parse_optional_float(os.environ.get("DRAWER_MARKER_OPEN_POS"))
 DRAWER_MARKER_OPEN_THRESHOLD = float(os.environ.get("DRAWER_MARKER_OPEN_THRESHOLD", "0.25"))
 DRAWER_MARKER_CLOSED_THRESHOLD = float(os.environ.get("DRAWER_MARKER_CLOSED_THRESHOLD", "0.10"))
-DRAWER_MARKER_INTERVAL = float(os.environ.get("DRAWER_MARKER_INTERVAL", "0.1"))
+DRAWER_MARKER_INTERVAL = float(os.environ.get("DRAWER_MARKER_INTERVAL", "0.25"))
 
-FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "640"))
-FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", "480"))
+FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", "320"))
+FRAME_HEIGHT = int(os.environ.get("FRAME_HEIGHT", "240"))
 TARGET_FPS = int(os.environ.get("TARGET_FPS", "8"))
 INPUT_SIZE = (640, 640)
 LOG_LIMIT = int(os.environ.get("LOG_LIMIT", "80"))
+SENSOR_COUNT = 3
+try:
+    PRIMARY_SENSOR_INDEX = int(os.environ.get("PRIMARY_SENSOR_INDEX", "1")) - 1
+except ValueError:
+    PRIMARY_SENSOR_INDEX = 0
+PRIMARY_SENSOR_INDEX = max(0, min(SENSOR_COUNT - 1, PRIMARY_SENSOR_INDEX))
+
+
+def parse_weight_directions(text, fallback):
+    directions = []
+    for part in str(text or "").split(","):
+        direction = part.strip().lower()
+        if direction in VALID_WEIGHT_DIRECTIONS:
+            directions.append(direction)
+    if not directions:
+        directions = [fallback] * SENSOR_COUNT
+    if len(directions) < SENSOR_COUNT:
+        directions += [fallback] * (SENSOR_COUNT - len(directions))
+    return directions[:SENSOR_COUNT]
+
+
+DRAWER_WEIGHT_DIRECTIONS_DEFAULT = parse_weight_directions(
+    os.environ.get("DRAWER_WEIGHT_DIRECTIONS"),
+    DRAWER_WEIGHT_DIRECTION_DEFAULT,
+)
 
 DEFAULT_CLASSES = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
@@ -195,8 +221,13 @@ control_lock = threading.Lock()
 latest_frame = None
 latest_loadcell_line = "Waiting for load cell..."
 latest_loadcell_value = None
+latest_loadcell_values = [None] * SENSOR_COUNT
+loadcell_baseline_pending = False
 latest_magnet_line = "Waiting for reed switch..."
 latest_magnet_detected = None
+latest_magnet_detected_values = [None] * SENSOR_COUNT
+latest_magnet_raw_values = [None] * SENSOR_COUNT
+magnet_override = os.environ.get("MAGNET_OVERRIDE", "real").lower()
 latest_detections = []
 latest_hands = []
 model_controls = {
@@ -215,12 +246,27 @@ yolo_inference_ms = None
 yolo_fps = None
 hand_inference_ms = None
 hand_fps = None
+
+
+def env_optional_int(name):
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 drawer_state = "STATE_IDLE"
 drawer_initial_weight = None
+drawer_initial_weights = [None] * SENSOR_COUNT
 drawer_final_weight = None
 drawer_weight_delta = None
+drawer_weight_deltas = [None] * SENSOR_COUNT
+drawer_selected_sensor_index = None
+drawer_magnet_not_detected_count = 0
 drawer_hand_seen = False
-drawer_hand_released = False
 drawer_last_hand_seen_ts = None
 drawer_last_event = "waiting"
 drawer_last_server_response = None
@@ -229,6 +275,17 @@ drawer_current_item = None
 drawer_current_drawer = None
 drawer_current_index = None
 drawer_current_total = None
+drawer_server_url = TEMI_SERVER_URL
+drawer_event_direction = os.environ.get("DRAWER_EVENT_DIRECTION", "in")
+drawer_weight_direction = DRAWER_WEIGHT_DIRECTION_DEFAULT
+drawer_weight_directions = list(DRAWER_WEIGHT_DIRECTIONS_DEFAULT)
+manual_target_active = os.environ.get("DRAWER_MANUAL_ACTIVE", "0").lower() not in {"0", "false", "no", "off"}
+manual_target_item = os.environ.get("DRAWER_MANUAL_ITEM", "manual-test")
+manual_target_drawer = env_optional_int("DRAWER_MANUAL_NUMBER")
+manual_target_drawer_label = os.environ.get("DRAWER_MANUAL_LABEL", "")
+manual_target_index = env_optional_int("DRAWER_MANUAL_INDEX")
+manual_target_total = env_optional_int("DRAWER_MANUAL_TOTAL")
+drawer_storage_session_id = env_optional_int("DRAWER_STORAGE_SESSION_ID") or 1
 temi_connected = None
 temi_status = "not checked"
 latest_drawer_marker = {
@@ -325,6 +382,102 @@ def parse_number(text):
     return float(matches[-1]) if matches else None
 
 
+def parse_indexed_numbers(text):
+    values = [None] * SENSOR_COUNT
+    for index_text, value_text in re.findall(r"\b([1-3])\s*=\s*(-?\d+(?:\.\d+)?)", str(text)):
+        values[int(index_text) - 1] = float(value_text)
+    return values
+
+
+def parse_reed_switches(text):
+    raw_values = [None] * SENSOR_COUNT
+    detected_values = [None] * SENSOR_COUNT
+    pattern = r"\b([1-3])\s*=\s*(-?\d+)\((DETECTED|NOT_DETECTED)\)"
+    for index_text, raw_text, state in re.findall(pattern, str(text)):
+        index = int(index_text) - 1
+        raw_values[index] = int(raw_text)
+        detected_values[index] = state == "DETECTED"
+    return raw_values, detected_values
+
+
+def first_available(values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def primary_value(values):
+    if values and values[PRIMARY_SENSOR_INDEX] is not None:
+        return values[PRIMARY_SENSOR_INDEX]
+    return first_available(values)
+
+
+def normalized_sensor_values(values):
+    result = list(values or [])
+    if len(result) < SENSOR_COUNT:
+        result += [None] * (SENSOR_COUNT - len(result))
+    return result[:SENSOR_COUNT]
+
+
+def applied_value_for_direction(value, direction):
+    if value is None:
+        return None
+    if direction == "down":
+        return -float(value)
+    if direction == "either":
+        return abs(float(value))
+    return float(value)
+
+
+def applied_loadcell_values(values, directions):
+    values = normalized_sensor_values(values)
+    directions = parse_weight_directions(",".join(directions or []), drawer_weight_direction)
+    return [
+        applied_value_for_direction(value, directions[index])
+        for index, value in enumerate(values)
+    ]
+
+
+def drawer_closed_from_magnets(values):
+    values = normalized_sensor_values(values)
+    if any(value is False for value in values):
+        return False
+    if any(value is True for value in values):
+        return True
+    return None
+
+
+def not_detected_indices(values):
+    return [index for index, value in enumerate(normalized_sensor_values(values)) if value is False]
+
+
+def format_loadcell_values(values):
+    parts = []
+    for index, value in enumerate(values, start=1):
+        if value is None:
+            parts.append(f"{index}=--")
+        else:
+            parts.append(f"{index}={float(value):.0f}")
+    return "Raw Readings: " + " ".join(parts)
+
+
+def format_magnet_values(detected_values, raw_values=None):
+    parts = []
+    raw_values = raw_values or [None] * SENSOR_COUNT
+    for index, detected in enumerate(detected_values, start=1):
+        raw = raw_values[index - 1]
+        if detected is None:
+            parts.append(f"{index}=--")
+            continue
+        state = "DETECTED" if detected else "NOT_DETECTED"
+        if raw is None:
+            parts.append(f"{index}={state}")
+        else:
+            parts.append(f"{index}={raw}({state})")
+    return "Reed Switches: " + " ".join(parts)
+
+
 def set_camera_status(status):
     global camera_status
     changed = False
@@ -379,20 +532,93 @@ def set_hand_status(status):
         add_log("hand", f"status: {status}")
 
 
-def update_loadcell(line):
-    global latest_loadcell_line, latest_loadcell_value
+def update_loadcell(line, values=None):
+    global latest_loadcell_line, latest_loadcell_value, latest_loadcell_values
+    global loadcell_baseline_pending, drawer_initial_weight, drawer_initial_weights, drawer_weight_delta, drawer_weight_deltas
+    if values is None and str(line).startswith("Raw Readings:"):
+        values = parse_indexed_numbers(line)
     with state_lock:
         latest_loadcell_line = line
-        latest_loadcell_value = parse_number(line)
+        if values is not None:
+            latest_loadcell_values = list(values)
+            latest_loadcell_value = primary_value(latest_loadcell_values)
+            if loadcell_baseline_pending:
+                drawer_initial_weights = normalized_sensor_values(latest_loadcell_values)
+                drawer_initial_weight = primary_value(drawer_initial_weights)
+                drawer_weight_delta = None
+                drawer_weight_deltas = [None] * SENSOR_COUNT
+                loadcell_baseline_pending = False
+                add_log("loadcell", f"software baseline reset: {format_loadcell_values(drawer_initial_weights)}")
+        else:
+            latest_loadcell_value = parse_number(line)
+            latest_loadcell_values = [latest_loadcell_value] + [None] * (SENSOR_COUNT - 1)
     add_log("loadcell", line)
 
 
-def update_magnet(line, detected):
-    global latest_magnet_line, latest_magnet_detected
+def update_magnet(line, detected, detected_values=None, raw_values=None):
+    global latest_magnet_line, latest_magnet_detected, latest_magnet_detected_values, latest_magnet_raw_values
+    if detected_values is None and str(line).startswith("Reed Switches:"):
+        raw_values, detected_values = parse_reed_switches(line)
     with state_lock:
         latest_magnet_line = line
-        latest_magnet_detected = detected
+        if detected_values is not None:
+            latest_magnet_detected_values = list(detected_values)
+            latest_magnet_detected = primary_value(latest_magnet_detected_values)
+        else:
+            latest_magnet_detected = detected
+            latest_magnet_detected_values = [detected] + [None] * (SENSOR_COUNT - 1)
+        if raw_values is not None:
+            latest_magnet_raw_values = list(raw_values)
     add_log("magnet", line)
+
+
+def effective_magnet_values():
+    with state_lock:
+        mode = magnet_override
+        values = normalized_sensor_values(latest_magnet_detected_values)
+        detected = primary_value(values)
+    if mode in {"closed", "detected", "1", "true"}:
+        return [True] * SENSOR_COUNT, True, "closed"
+    if mode in {"open", "not_detected", "not-detected", "0", "false"}:
+        return [False] * SENSOR_COUNT, False, "open"
+    return values, detected, "real"
+
+
+def effective_magnet_state():
+    values, detected, mode = effective_magnet_values()
+    if mode == "closed":
+        return "FORCED Magnet: DETECTED", detected, mode
+    if mode == "open":
+        return "FORCED Magnet: NOT_DETECTED", detected, mode
+    with state_lock:
+        line = latest_magnet_line
+    return line, detected, "real"
+
+
+def set_magnet_override(mode):
+    global magnet_override
+    normalized = str(mode or "real").strip().lower()
+    aliases = {
+        "": "real",
+        "auto": "real",
+        "off": "real",
+        "real": "real",
+        "closed": "closed",
+        "detected": "closed",
+        "1": "closed",
+        "true": "closed",
+        "open": "open",
+        "not_detected": "open",
+        "not-detected": "open",
+        "0": "open",
+        "false": "open",
+    }
+    if normalized not in aliases:
+        raise ValueError("magnet override must be real, closed, or open")
+    with state_lock:
+        magnet_override = aliases[normalized]
+    add_log("magnet", f"override: {magnet_override}")
+    add_log("comms", f"magnet override: {magnet_override}")
 
 
 def update_detections(detections, inference_ms):
@@ -424,8 +650,10 @@ def update_hands(hands, inference_ms):
 
 
 def set_drawer_status(state=None, **updates):
-    global drawer_state, drawer_initial_weight, drawer_final_weight, drawer_weight_delta
-    global drawer_hand_seen, drawer_hand_released, drawer_last_hand_seen_ts, drawer_last_event, drawer_last_server_response
+    global drawer_state, drawer_initial_weight, drawer_final_weight, drawer_weight_delta, drawer_weight_deltas
+    global drawer_initial_weights
+    global drawer_selected_sensor_index, drawer_magnet_not_detected_count
+    global drawer_hand_seen, drawer_last_hand_seen_ts, drawer_last_event, drawer_last_server_response
     global drawer_current_active, drawer_current_item, drawer_current_drawer, drawer_current_index, drawer_current_total
 
     with state_lock:
@@ -433,14 +661,20 @@ def set_drawer_status(state=None, **updates):
             drawer_state = state
         if "initial_weight" in updates:
             drawer_initial_weight = updates["initial_weight"]
+        if "initial_weights" in updates:
+            drawer_initial_weights = normalized_sensor_values(updates["initial_weights"])
         if "final_weight" in updates:
             drawer_final_weight = updates["final_weight"]
         if "weight_delta" in updates:
             drawer_weight_delta = updates["weight_delta"]
+        if "weight_deltas" in updates:
+            drawer_weight_deltas = normalized_sensor_values(updates["weight_deltas"])
+        if "selected_sensor_index" in updates:
+            drawer_selected_sensor_index = updates["selected_sensor_index"]
+        if "magnet_not_detected_count" in updates:
+            drawer_magnet_not_detected_count = updates["magnet_not_detected_count"]
         if "hand_seen" in updates:
             drawer_hand_seen = updates["hand_seen"]
-        if "hand_released" in updates:
-            drawer_hand_released = updates["hand_released"]
         if "last_hand_seen_ts" in updates:
             drawer_last_hand_seen_ts = updates["last_hand_seen_ts"]
         if "last_event" in updates:
@@ -472,24 +706,130 @@ def set_temi_connection(connected, status):
         add_log("server", message)
 
 
+def normalize_server_url(value):
+    text = str(value or "").strip()
+    if not text:
+        return TEMI_SERVER_URL
+    if not text.startswith(("http://", "https://")):
+        text = "http://" + text
+    return text.rstrip("/")
+
+
+def parse_optional_int(value):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def utc_timestamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def set_runtime_scenario_config(data):
+    global drawer_server_url, drawer_event_direction, drawer_weight_direction, drawer_weight_directions
+    global manual_target_active, manual_target_item, manual_target_drawer
+    global manual_target_drawer_label, manual_target_index, manual_target_total
+
+    with state_lock:
+        if "server_url" in data:
+            drawer_server_url = normalize_server_url(data.get("server_url"))
+        if "direction" in data:
+            direction = str(data.get("direction") or "").strip().lower()
+            if direction in {"in", "out"}:
+                drawer_event_direction = direction
+        if "weight_direction" in data:
+            direction = str(data.get("weight_direction") or "").strip().lower()
+            if direction in VALID_WEIGHT_DIRECTIONS:
+                drawer_weight_direction = direction
+                drawer_weight_directions = [direction] * SENSOR_COUNT
+        if "weight_directions" in data:
+            if isinstance(data.get("weight_directions"), (list, tuple)):
+                raw_directions = ",".join(str(value) for value in data.get("weight_directions"))
+            else:
+                raw_directions = data.get("weight_directions")
+            drawer_weight_directions = parse_weight_directions(raw_directions, drawer_weight_direction)
+        if "manual_active" in data:
+            manual_target_active = bool(data.get("manual_active"))
+        if "item_name" in data:
+            manual_target_item = str(data.get("item_name") or "manual-test").strip() or "manual-test"
+        if "drawer_number" in data:
+            manual_target_drawer = parse_optional_int(data.get("drawer_number"))
+        if "drawer_label" in data:
+            manual_target_drawer_label = str(data.get("drawer_label") or "").strip()
+        if "current_index" in data:
+            manual_target_index = parse_optional_int(data.get("current_index"))
+        if "total" in data:
+            manual_target_total = parse_optional_int(data.get("total"))
+
+    add_log(
+        "comms",
+        "scenario config updated "
+        f"manual={manual_target_active} url={drawer_server_url} "
+        f"drawer={manual_target_drawer} direction={drawer_event_direction} "
+        f"weight_direction={drawer_weight_direction} weight_directions={drawer_weight_directions}",
+    )
+
+
+def scenario_config_snapshot():
+    with state_lock:
+        return {
+            "server_url": drawer_server_url,
+            "direction": drawer_event_direction,
+            "weight_direction": drawer_weight_direction,
+            "weight_directions": list(drawer_weight_directions),
+            "weight_threshold": DRAWER_WEIGHT_THRESHOLD,
+            "manual_active": manual_target_active,
+            "item_name": manual_target_item,
+            "drawer_number": manual_target_drawer,
+            "drawer_label": manual_target_drawer_label,
+            "current_index": manual_target_index,
+            "total": manual_target_total,
+        }
+
+
+def manual_target_snapshot():
+    with state_lock:
+        if not manual_target_active:
+            return None
+        return {
+            "item_name": manual_target_item or "manual-test",
+            "drawer_number": manual_target_drawer,
+            "drawer_label": manual_target_drawer_label,
+            "current_index": manual_target_index,
+            "total": manual_target_total,
+            "manual": True,
+        }
+
+
 def drawer_snapshot():
     with state_lock:
         return {
             "state": drawer_state,
             "initial_weight": drawer_initial_weight,
+            "initial_weights": drawer_initial_weights,
             "final_weight": drawer_final_weight,
             "weight_delta": drawer_weight_delta,
+            "weight_deltas": drawer_weight_deltas,
+            "selected_sensor_index": None if drawer_selected_sensor_index is None else drawer_selected_sensor_index + 1,
+            "magnet_not_detected_count": drawer_magnet_not_detected_count,
             "hand_seen": drawer_hand_seen,
-            "hand_released": drawer_hand_released,
             "last_hand_seen_ts": drawer_last_hand_seen_ts,
             "last_event": drawer_last_event,
             "last_server_response": drawer_last_server_response,
-            "temi_server_url": TEMI_SERVER_URL,
+            "temi_server_url": drawer_server_url,
             "current_active": drawer_current_active,
             "current_item": drawer_current_item,
             "current_drawer": drawer_current_drawer,
             "current_index": drawer_current_index,
             "current_total": drawer_current_total,
+            "direction": drawer_event_direction,
+            "weight_direction": drawer_weight_direction,
+            "weight_directions": list(drawer_weight_directions),
+            "weight_threshold": DRAWER_WEIGHT_THRESHOLD,
+            "manual_target_active": manual_target_active,
             "temi_connected": temi_connected,
             "temi_status": temi_status,
         }
@@ -613,7 +953,9 @@ def request_json(url, method="GET", payload_obj=None):
 
 
 def get_temi_current_placement():
-    url = f"{TEMI_SERVER_URL}/api/placement-batches/current"
+    with state_lock:
+        server_url = drawer_server_url
+    url = f"{server_url}/api/placement-batches/current"
     try:
         data, result = request_json(url)
         set_drawer_status(last_server_response=result)
@@ -644,14 +986,48 @@ def extract_temi_target(batch):
     return {
         "item_name": str(item_name),
         "drawer_number": drawer_number,
+        "drawer_label": current.get("drawer_label") or current.get("drawer_name") or current.get("drawer"),
         "current_index": batch.get("current_index"),
         "total": batch.get("total"),
     }
 
 
-def post_temi_sensor_event(ok):
-    url = f"{TEMI_SERVER_URL}/api/sensor-events"
-    payload_obj = {"event_type": "VERIFY_SUCCESS" if ok else "VERIFY_FAIL"}
+def build_sensor_event_payload(ok, target=None, details=None):
+    with state_lock:
+        direction = drawer_event_direction
+        current_item = drawer_current_item
+        current_drawer = drawer_current_drawer
+        current_index = drawer_current_index
+        current_total = drawer_current_total
+
+    target = target or {}
+    details = details or {}
+    drawer_number = target.get("drawer_number", current_drawer)
+    drawer_label = target.get("drawer_label") or (f"drawer-{drawer_number}" if drawer_number is not None else None)
+
+    payload_obj = {
+        "storage_session_id": target.get("storage_session_id") or details.get("storage_session_id") or drawer_storage_session_id,
+        "sensor_type": "load_cell",
+        "event_type": "sequence_completed" if ok else "verification_failed",
+        "drawer": drawer_label,
+        "drawer_number": drawer_number,
+        "no_drawer": drawer_number,
+        "direction": direction,
+        "in_out": direction,
+        "timestamp": utc_timestamp(),
+        "item_name": target.get("item_name") or current_item,
+        "current_index": target.get("current_index", current_index),
+        "total": target.get("total", current_total),
+    }
+    payload_obj.update({key: value for key, value in details.items() if value is not None})
+    return payload_obj
+
+
+def post_temi_sensor_event(ok, target=None, details=None):
+    with state_lock:
+        server_url = drawer_server_url
+    url = f"{server_url}{TEMI_SENSOR_EVENTS_PATH}"
+    payload_obj = build_sensor_event_payload(ok, target=target, details=details)
     add_log("server", f"POST {url} payload={payload_obj}")
     try:
         _, result = request_json(url, method="POST", payload_obj=payload_obj)
@@ -669,21 +1045,35 @@ def post_temi_sensor_event(ok):
         return False
 
 
-def send_debug_temi_success_event():
+def send_debug_temi_success_event(options=None):
     add_log("comms", "DEBUG VERIFY_SUCCESS manual send requested")
-    ok = post_temi_sensor_event(True)
+    options = options or {}
+    target = manual_target_snapshot() or {}
+    details = {"debug": True}
+    if options.get("drawer_number") is not None:
+        drawer_number = int(options["drawer_number"])
+        target.update(
+            {
+                "drawer_number": drawer_number,
+                "drawer_label": options.get("drawer_label") or f"drawer-{drawer_number}",
+            }
+        )
+    if options.get("timestamp"):
+        details["timestamp"] = options["timestamp"]
+    payload = build_sensor_event_payload(True, target=target, details=details)
+    ok = post_temi_sensor_event(True, target=target, details=details)
     if ok:
         set_drawer_status(last_event="DEBUG_VERIFY_SUCCESS_SENT")
         return {
             "ok": True,
-            "url": f"{TEMI_SERVER_URL}/api/sensor-events",
-            "payload": {"event_type": "VERIFY_SUCCESS"},
+            "url": f"{drawer_server_url}{TEMI_SENSOR_EVENTS_PATH}",
+            "payload": payload,
             "result": "VERIFY_SUCCESS sent",
         }
     return {
         "ok": False,
-        "url": f"{TEMI_SERVER_URL}/api/sensor-events",
-        "payload": {"event_type": "VERIFY_SUCCESS"},
+        "url": f"{drawer_server_url}{TEMI_SENSOR_EVENTS_PATH}",
+        "payload": payload,
         "error": "VERIFY_SUCCESS send failed",
     }
 
@@ -694,23 +1084,18 @@ def normalize_match_label(text):
 
 def camera_hand_state(detections, hands):
     grab_labels = {normalize_match_label(label) for label in DRAWER_GRAB_LABELS}
-    release_labels = {normalize_match_label(label) for label in DRAWER_RELEASE_LABELS}
     grab_seen = False
-    release_seen = False
     hand_present = False
     labels = []
 
     def classify_label(label):
-        nonlocal grab_seen, release_seen, hand_present
+        nonlocal grab_seen, hand_present
         normalized = normalize_match_label(label)
         if not normalized or normalized == "none":
             return
         labels.append(str(label))
         if normalized in grab_labels:
             grab_seen = True
-            hand_present = True
-        elif normalized in release_labels:
-            release_seen = True
             hand_present = True
         elif "hand" in normalized or "fist" in normalized or "palm" in normalized:
             hand_present = True
@@ -725,9 +1110,90 @@ def camera_hand_state(detections, hands):
 
     return {
         "grab_seen": grab_seen,
-        "release_seen": release_seen,
         "hand_present": hand_present,
         "labels": labels,
+    }
+
+
+def evaluate_weight_change(initial_weight, final_weight, weight_direction):
+    if initial_weight is None or final_weight is None:
+        return None, None, False
+
+    delta = final_weight - initial_weight
+    if weight_direction == "down":
+        effective_delta = -delta
+    elif weight_direction == "either":
+        effective_delta = abs(delta)
+    else:
+        effective_delta = delta
+    return delta, effective_delta, effective_delta >= DRAWER_WEIGHT_THRESHOLD
+
+
+def evaluate_sensor_weight_changes(initial_values, final_values, weight_directions):
+    initial_values = normalized_sensor_values(initial_values)
+    final_values = normalized_sensor_values(final_values)
+    weight_directions = parse_weight_directions(",".join(weight_directions or []), drawer_weight_direction)
+    results = []
+    for index in range(SENSOR_COUNT):
+        weight_direction = weight_directions[index]
+        delta, effective_delta, weight_ok = evaluate_weight_change(
+            initial_values[index],
+            final_values[index],
+            weight_direction,
+        )
+        results.append(
+            {
+                "sensor_index": index,
+                "initial_weight": initial_values[index],
+                "final_weight": final_values[index],
+                "weight_delta": delta,
+                "weight_effective_delta": effective_delta,
+                "weight_ok": weight_ok,
+                "weight_direction": weight_direction,
+            }
+        )
+    return results
+
+
+def select_verification_sensor(initial_values, final_values, magnet_values, weight_directions):
+    weight_results = evaluate_sensor_weight_changes(initial_values, final_values, weight_directions)
+    candidates = not_detected_indices(magnet_values)
+    selected_index = None
+
+    if len(candidates) == 1:
+        selected_index = candidates[0]
+    elif len(candidates) >= 2:
+        selected_index = max(
+            candidates,
+            key=lambda index: (
+                -1.0
+                if weight_results[index]["weight_delta"] is None
+                else abs(weight_results[index]["weight_delta"])
+            ),
+        )
+    else:
+        available = [
+            result["sensor_index"]
+            for result in weight_results
+            if result["weight_delta"] is not None
+        ]
+        selected_index = available[0] if available else PRIMARY_SENSOR_INDEX
+
+    selected = weight_results[selected_index]
+    raw_delta = selected["weight_delta"]
+    adjusted_delta = selected["weight_effective_delta"]
+    return {
+        **selected,
+        "weight_raw_delta": raw_delta,
+        "weight_delta": adjusted_delta,
+        "selected_sensor_index": selected_index,
+        "magnet_not_detected": selected_index in candidates,
+        "magnet_not_detected_count": len(candidates),
+        "weight_raw_deltas": [result["weight_delta"] for result in weight_results],
+        "weight_deltas": [result["weight_effective_delta"] for result in weight_results],
+        "weight_effective_deltas": [result["weight_effective_delta"] for result in weight_results],
+        "weight_directions": [result["weight_direction"] for result in weight_results],
+        "not_detected_sensor_indices": [index + 1 for index in candidates],
     }
 
 
@@ -740,7 +1206,6 @@ def drawer_note(event, **extra):
         "final_weight",
         "weight_delta",
         "hand_seen",
-        "hand_released",
         "current_item",
         "current_drawer",
         "camera_status",
@@ -762,9 +1227,10 @@ def drawer_scenario_thread():
     local_state = "STATE_IDLE"
     last_door_closed = None
     hand_seen = False
-    hand_released = False
     last_hand_seen_ts = None
     initial_weight = None
+    initial_weight_values = [None] * SENSOR_COUNT
+    verification_result = None
     current_target = None
     camera_ok = False
     marker_mismatch_active = False
@@ -772,18 +1238,19 @@ def drawer_scenario_thread():
     last_target_signature = None
 
     set_drawer_status(local_state, last_event="started")
-    add_log("comms", f"drawer scenario started; temi={TEMI_SERVER_URL}")
+    add_log("comms", f"drawer scenario started; server={drawer_server_url}")
 
     while True:
         with state_lock:
-            magnet_detected = latest_magnet_detected
+            loadcell_values = normalized_sensor_values(latest_loadcell_values)
             loadcell_value = latest_loadcell_value
             detections = list(latest_detections)
             hands = list(latest_hands)
             cam_status = camera_status
             marker = dict(latest_drawer_marker)
+        magnet_values, magnet_detected, _ = effective_magnet_values()
 
-        door_closed = bool(magnet_detected) if magnet_detected is not None else None
+        door_closed = drawer_closed_from_magnets(magnet_values)
         now = time.time()
         hand_state = camera_hand_state(detections, hands)
         marker_detected = bool(marker.get("detected"))
@@ -813,7 +1280,41 @@ def drawer_scenario_thread():
             add_log("marker", "MARKER_MISMATCH_RESOLVED")
 
         if local_state == "STATE_IDLE":
-            if now >= next_temi_poll_ts:
+            manual_target = manual_target_snapshot()
+            if manual_target is not None:
+                current_target = manual_target
+                target_signature = (
+                    "manual",
+                    current_target["item_name"],
+                    current_target.get("drawer_number"),
+                    current_target.get("drawer_label"),
+                    current_target.get("current_index"),
+                    current_target.get("total"),
+                )
+                if target_signature != last_target_signature:
+                    add_log(
+                        "comms",
+                        "Manual target: "
+                        f"item={current_target['item_name']} "
+                        f"drawer={current_target.get('drawer_number')} "
+                        f"label={current_target.get('drawer_label') or '--'} "
+                        f"direction={drawer_event_direction}",
+                    )
+                    last_target_signature = target_signature
+                set_drawer_status(
+                    current_active=True,
+                    current_item=current_target["item_name"],
+                    current_drawer=current_target.get("drawer_number"),
+                    current_index=current_target.get("current_index"),
+                    current_total=current_target.get("total"),
+                    initial_weight=None,
+                    final_weight=None,
+                    weight_delta=None,
+                    hand_seen=False,
+                    last_hand_seen_ts=None,
+                    last_event="WAIT_DRAWER_OPEN",
+                )
+            elif now >= next_temi_poll_ts:
                 batch = get_temi_current_placement()
                 current_target = extract_temi_target(batch)
                 next_temi_poll_ts = now + TEMI_IDLE_POLL_INTERVAL
@@ -828,14 +1329,15 @@ def drawer_scenario_thread():
                         current_drawer=None,
                         current_index=None,
                         current_total=None,
-                        hand_released=False,
                         hand_seen=False,
                         last_event="WAIT_TEMI",
                     )
                 else:
                     target_signature = (
+                        "temi",
                         current_target["item_name"],
                         current_target.get("drawer_number"),
+                        current_target.get("drawer_label"),
                         current_target.get("current_index"),
                         current_target.get("total"),
                     )
@@ -856,9 +1358,9 @@ def drawer_scenario_thread():
                         current_index=current_target.get("current_index"),
                         current_total=current_target.get("total"),
                         initial_weight=None,
+                        initial_weights=[None] * SENSOR_COUNT,
                         final_weight=None,
                         weight_delta=None,
-                        hand_released=False,
                         hand_seen=False,
                         last_hand_seen_ts=None,
                         last_event="WAIT_DRAWER_OPEN",
@@ -870,20 +1372,24 @@ def drawer_scenario_thread():
                 time.sleep(DRAWER_LOOP_INTERVAL)
                 continue
 
-            if door_closed is False and last_door_closed is True:
+            if door_closed is False:
                 initial_weight = loadcell_value
+                initial_weight_values = loadcell_values
                 hand_seen = False
-                hand_released = False
                 last_hand_seen_ts = None
+                verification_result = None
                 camera_ok = False
                 local_state = "STATE_WAIT_CAMERA"
                 set_drawer_status(
                     local_state,
                     initial_weight=initial_weight,
+                    initial_weights=initial_weight_values,
                     final_weight=None,
                     weight_delta=None,
+                    weight_deltas=[None] * SENSOR_COUNT,
+                    selected_sensor_index=None,
+                    magnet_not_detected_count=len(not_detected_indices(magnet_values)),
                     hand_seen=False,
-                    hand_released=False,
                     last_hand_seen_ts=None,
                     last_event="DOOR_OPEN",
                 )
@@ -892,58 +1398,142 @@ def drawer_scenario_thread():
                     "DOOR_OPEN "
                     f"item={current_target['item_name']} "
                     f"drawer={current_target.get('drawer_number')} "
-                    f"initial_weight={initial_weight}",
+                    f"initial_weights={initial_weight_values} "
+                    f"not_detected_sensors={[index + 1 for index in not_detected_indices(magnet_values)]}",
                 )
 
         elif local_state == "STATE_WAIT_CAMERA":
-            if hand_state["grab_seen"]:
+            if hand_state["hand_present"]:
                 if not hand_seen:
-                    add_log("comms", f"HAND_GRAB labels={hand_state['labels']}")
+                    add_log("comms", f"HAND_DETECTED labels={hand_state['labels']}")
                 hand_seen = True
                 last_hand_seen_ts = now
-                set_drawer_status(hand_seen=True, last_hand_seen_ts=last_hand_seen_ts, last_event="HAND_GRAB")
-
-            if hand_state["release_seen"] and hand_seen:
-                hand_released = True
-
-            if hand_released:
-                camera_ok = bool(hand_seen)
-                local_state = "STATE_VERIFY"
-                set_drawer_status(local_state, last_event="HAND_RELEASED", hand_released=True)
-                add_log(
-                    "comms",
-                    f"HAND_RELEASED camera_ok={camera_ok} hand_seen={hand_seen} labels={hand_state['labels']}",
+                local_state = "STATE_WAIT_WEIGHT"
+                set_drawer_status(
+                    local_state,
+                    hand_seen=True,
+                    last_hand_seen_ts=last_hand_seen_ts,
+                    last_event="HAND_DETECTED",
                 )
 
-        elif local_state == "STATE_VERIFY":
-            final_weight = loadcell_value
-            if initial_weight is None or final_weight is None:
-                delta = None
-                weight_ok = False
-            else:
-                delta = final_weight - initial_weight
-                weight_ok = delta >= DRAWER_WEIGHT_THRESHOLD
+        elif local_state == "STATE_WAIT_WEIGHT":
+            with state_lock:
+                weight_directions = list(drawer_weight_directions)
+            verification = select_verification_sensor(
+                initial_weight_values,
+                loadcell_values,
+                magnet_values,
+                weight_directions,
+            )
+            final_weight = verification["final_weight"]
+            delta = verification["weight_delta"]
+            effective_delta = verification["weight_effective_delta"]
+            weight_ok = verification["weight_ok"]
+            weight_direction = verification["weight_direction"]
+            elapsed = 0.0 if last_hand_seen_ts is None else now - last_hand_seen_ts
+            timed_out = elapsed >= DRAWER_VERIFY_WEIGHT_TIMEOUT
+            set_drawer_status(
+                local_state,
+                final_weight=final_weight,
+                weight_delta=delta,
+                weight_deltas=verification["weight_deltas"],
+                selected_sensor_index=verification["selected_sensor_index"],
+                magnet_not_detected_count=verification["magnet_not_detected_count"],
+                last_event="WAIT_WEIGHT",
+            )
+            if weight_ok:
+                verification_result = verification
+                camera_ok = bool(hand_seen)
+                add_log(
+                    "comms",
+                    f"WEIGHT_READY sensor={verification['selected_sensor_index'] + 1} "
+                    f"direction={weight_direction} directions={verification['weight_directions']} "
+                    f"initial={verification['initial_weight']} final={final_weight} "
+                    f"delta={delta} effective_delta={effective_delta} "
+                    f"not_detected_sensors={verification['not_detected_sensor_indices']}",
+                )
+                local_state = "STATE_VERIFY"
+                set_drawer_status(local_state, last_event="WEIGHT_READY")
+            elif timed_out or door_closed is True:
+                reason = "door_closed" if door_closed is True else "timeout"
+                verification_result = verification
+                camera_ok = False
+                add_log(
+                    "comms",
+                    f"WEIGHT_WAIT_END reason={reason} sensor={verification['selected_sensor_index'] + 1} "
+                    f"weight_ok={weight_ok} direction={weight_direction} directions={verification['weight_directions']} "
+                    f"initial={verification['initial_weight']} final={final_weight} "
+                    f"delta={delta} effective_delta={effective_delta} "
+                    f"not_detected_sensors={verification['not_detected_sensor_indices']}",
+                )
+                local_state = "STATE_VERIFY"
 
-            success = bool(camera_ok and weight_ok)
+        elif local_state == "STATE_VERIFY":
+            with state_lock:
+                weight_directions = list(drawer_weight_directions)
+            verification = verification_result or select_verification_sensor(
+                initial_weight_values,
+                loadcell_values,
+                magnet_values,
+                weight_directions,
+            )
+            final_weight = verification["final_weight"]
+            delta = verification["weight_delta"]
+            effective_delta = verification["weight_effective_delta"]
+            weight_ok = verification["weight_ok"]
+            weight_direction = verification["weight_direction"]
+
+            magnet_not_detected = verification["magnet_not_detected"]
+            success = bool(magnet_not_detected and camera_ok and weight_ok)
 
             result = "VERIFY_SUCCESS" if success else "VERIFY_FAIL"
             set_drawer_status(
                 local_state,
                 final_weight=final_weight,
                 weight_delta=delta,
+                weight_deltas=verification["weight_deltas"],
+                selected_sensor_index=verification["selected_sensor_index"],
+                magnet_not_detected_count=verification["magnet_not_detected_count"],
                 last_event=result,
             )
             add_log(
                 "comms",
-                f"{result} camera_ok={camera_ok} weight_ok={weight_ok} "
-                f"initial={initial_weight} final={final_weight} delta={delta}",
+                f"{result} sensor={verification['selected_sensor_index'] + 1} "
+                f"magnet_not_detected={magnet_not_detected} camera_ok={camera_ok} weight_ok={weight_ok} "
+                f"direction={weight_direction} directions={verification['weight_directions']} "
+                f"initial={verification['initial_weight']} final={final_weight} "
+                f"delta={delta} effective_delta={effective_delta} "
+                f"not_detected_sensors={verification['not_detected_sensor_indices']}",
             )
-            post_temi_sensor_event(success)
+            post_temi_sensor_event(
+                success,
+                target=current_target,
+                details={
+                    "camera_ok": camera_ok,
+                    "weight_ok": weight_ok,
+                    "magnet_not_detected": magnet_not_detected,
+                    "selected_sensor_index": verification["selected_sensor_index"] + 1,
+                    "not_detected_sensor_indices": verification["not_detected_sensor_indices"],
+                    "magnet_not_detected_count": verification["magnet_not_detected_count"],
+                    "initial_weight": verification["initial_weight"],
+                    "final_weight": final_weight,
+                    "weight_raw_delta": verification["weight_raw_delta"],
+                    "weight_delta": delta,
+                    "weight_effective_delta": effective_delta,
+                    "weight_raw_deltas": verification["weight_raw_deltas"],
+                    "weight_deltas": verification["weight_deltas"],
+                    "weight_effective_deltas": verification["weight_effective_deltas"],
+                    "weight_direction": weight_direction,
+                    "weight_directions": verification["weight_directions"],
+                    "weight_threshold": DRAWER_WEIGHT_THRESHOLD,
+                    "hand_seen": hand_seen,
+                },
+            )
             local_state = "STATE_WAIT_CLOSE"
             set_drawer_status(local_state, last_event=result)
 
         elif local_state == "STATE_WAIT_CLOSE":
-            if door_closed is True and last_door_closed is False:
+            if door_closed is True:
                 local_state = "STATE_IDLE"
                 set_drawer_status(local_state, last_event="DOOR_CLOSE")
                 add_log("comms", "DOOR_CLOSE")
@@ -1111,6 +1701,45 @@ def router_cli_call(method):
     return text
 
 
+def to_optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float, bool)):
+        return float(value)
+    text = str(value).strip()
+    if text == "":
+        return None
+    return float(text)
+
+
+def read_numbered_bridge(base_method, legacy_method=None):
+    values = []
+    try:
+        for index in range(1, SENSOR_COUNT + 1):
+            values.append(to_optional_float(Bridge.call(f"{base_method}_{index}")))
+        return values
+    except Exception:
+        if legacy_method is None:
+            raise
+        return [to_optional_float(Bridge.call(legacy_method))] + [None] * (SENSOR_COUNT - 1)
+
+
+def read_numbered_router(base_method, legacy_method=None):
+    values = []
+    try:
+        for index in range(1, SENSOR_COUNT + 1):
+            values.append(to_optional_float(router_cli_call(f"{base_method}_{index}")))
+        return values
+    except Exception:
+        if legacy_method is None:
+            raise
+        return [to_optional_float(router_cli_call(legacy_method))] + [None] * (SENSOR_COUNT - 1)
+
+
+def number_list_to_bool(values):
+    return [None if value is None else float(value) != 0.0 for value in values]
+
+
 def router_cli_available():
     has_socket = Path("/var/run/arduino-router.sock").exists() or Path("/run/arduino-router.sock").exists()
     return has_socket and shutil.which("arduino-router-cli") is not None
@@ -1263,15 +1892,20 @@ def loadcell_thread():
             try:
                 set_loadcell_status("connected: RouterBridge")
                 set_magnet_status("connected: RouterBridge")
-                value = Bridge.call("loadcell_read")
-                update_loadcell(f"Raw Reading: {value}")
-                detected = bool(Bridge.call("magnet_read"))
+                values = read_numbered_bridge("loadcell_read", "loadcell_read")
+                update_loadcell(format_loadcell_values(values), values)
+                magnet_values = number_list_to_bool(read_numbered_bridge("magnet_read", "magnet_read"))
+                raw_values = None
                 try:
-                    raw = Bridge.call("magnet_raw_read")
-                    line = f"Magnet Raw: {raw} / Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
+                    raw_values = read_numbered_bridge("magnet_raw_read", "magnet_raw_read")
                 except Exception:
-                    line = "Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
-                update_magnet(line, detected)
+                    pass
+                update_magnet(
+                    format_magnet_values(magnet_values, raw_values),
+                    primary_value(magnet_values),
+                    magnet_values,
+                    raw_values,
+                )
             except Exception as exc:
                 set_loadcell_status(f"bridge failed: {exc}")
                 set_magnet_status(f"bridge failed: {exc}")
@@ -1282,9 +1916,9 @@ def loadcell_thread():
     if LOADCELL_SOURCE in {"auto", "bridge"} and router_cli_available():
         while True:
             try:
-                value = router_cli_call("loadcell_read")
+                values = read_numbered_router("loadcell_read", "loadcell_read")
                 set_loadcell_status("connected: arduino-router-cli")
-                update_loadcell(f"Raw Reading: {value}")
+                update_loadcell(format_loadcell_values(values), values)
             except subprocess.TimeoutExpired:
                 set_loadcell_status(f"router timeout after {ROUTER_CLI_TIMEOUT:.1f}s")
             except Exception as exc:
@@ -1293,15 +1927,19 @@ def loadcell_thread():
                     break
 
             try:
-                detected_text = router_cli_call("magnet_read")
-                detected = float(detected_text) != 0.0
+                magnet_values = number_list_to_bool(read_numbered_router("magnet_read", "magnet_read"))
+                raw_values = None
                 try:
-                    raw = router_cli_call("magnet_raw_read")
-                    line = f"Magnet Raw: {raw} / Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
+                    raw_values = read_numbered_router("magnet_raw_read", "magnet_raw_read")
                 except Exception:
-                    line = "Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
+                    pass
                 set_magnet_status("connected: arduino-router-cli")
-                update_magnet(line, detected)
+                update_magnet(
+                    format_magnet_values(magnet_values, raw_values),
+                    primary_value(magnet_values),
+                    magnet_values,
+                    raw_values,
+                )
             except subprocess.TimeoutExpired:
                 set_magnet_status(f"router timeout after {ROUTER_CLI_TIMEOUT:.1f}s")
             except Exception as exc:
@@ -1328,8 +1966,12 @@ def loadcell_thread():
                     line = ser.readline().decode("utf-8", errors="ignore").strip()
                     if line.startswith("Raw Reading:"):
                         update_loadcell(line)
+                    elif line.startswith("Raw Readings:"):
+                        update_loadcell(line)
                     elif line.startswith("Reed Switch Raw:"):
                         update_magnet(line, "DETECTED" in line and "NOT_DETECTED" not in line)
+                    elif line.startswith("Reed Switches:"):
+                        update_magnet(line, None)
         except Exception as exc:
             set_loadcell_status(f"failed: {exc}")
             set_magnet_status(f"serial failed: {exc}")
@@ -1344,15 +1986,17 @@ def magnet_thread():
     while True:
         try:
             set_magnet_status("connected: RouterBridge")
-            detected = bool(Bridge.call("magnet_read"))
+            magnet_values = number_list_to_bool(read_numbered_bridge("magnet_read", "magnet_read"))
+            raw_values = None
             try:
-                raw = Bridge.call("magnet_raw_read")
-                line = f"Magnet Raw: {raw} / Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
+                raw_values = read_numbered_bridge("magnet_raw_read", "magnet_raw_read")
             except Exception:
-                line = "Magnet: " + ("DETECTED" if detected else "NOT_DETECTED")
+                pass
             update_magnet(
-                line,
-                detected,
+                format_magnet_values(magnet_values, raw_values),
+                primary_value(magnet_values),
+                magnet_values,
+                raw_values,
             )
         except Exception as exc:
             set_magnet_status(f"bridge failed: {exc}")
@@ -2044,8 +2688,11 @@ def draw_overlay(frame):
     with state_lock:
         loadcell_line = latest_loadcell_line
         loadcell_value = latest_loadcell_value
-        magnet_line = latest_magnet_line
-        magnet_detected = latest_magnet_detected
+        loadcell_values = list(latest_loadcell_values)
+        weight_directions = list(drawer_weight_directions)
+        overlay_sensor_index = drawer_selected_sensor_index
+        if overlay_sensor_index is None:
+            overlay_sensor_index = PRIMARY_SENSOR_INDEX
         detections = list(latest_detections)
         hands = list(latest_hands)
         cam_status = camera_status
@@ -2058,8 +2705,8 @@ def draw_overlay(frame):
         dd_delta = drawer_weight_delta
         dd_item = drawer_current_item
         dd_drawer = drawer_current_drawer
-        dd_hand_released = drawer_hand_released
         marker = dict(latest_drawer_marker)
+    magnet_line, magnet_detected, magnet_mode = effective_magnet_state()
 
     img = frame.copy()
 
@@ -2088,12 +2735,20 @@ def draw_overlay(frame):
     cv2.rectangle(overlay, (0, 0), (img.shape[1], panel_height), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.62, img, 0.38, 0, img)
 
+    applied_values = applied_loadcell_values(loadcell_values, weight_directions)
+    overlay_raw_value = loadcell_values[overlay_sensor_index] if 0 <= overlay_sensor_index < SENSOR_COUNT else loadcell_value
+    overlay_applied_value = applied_values[overlay_sensor_index] if 0 <= overlay_sensor_index < SENSOR_COUNT else loadcell_value
+    overlay_direction = weight_directions[overlay_sensor_index] if 0 <= overlay_sensor_index < SENSOR_COUNT else drawer_weight_direction
     value_text = "Load cell: --"
-    if loadcell_value is not None:
-        value_text = f"Load cell: {loadcell_value:.0f}"
+    if overlay_applied_value is not None:
+        value_text = f"Load cell {overlay_sensor_index + 1}: {overlay_applied_value:.0f} applied"
+        if overlay_raw_value is not None:
+            value_text += f" raw={overlay_raw_value:.0f} {overlay_direction}"
     magnet_text = "Magnet: --"
     if magnet_detected is not None:
         magnet_text = "Magnet: DETECTED" if magnet_detected else "Magnet: NOT DETECTED"
+        if magnet_mode != "real":
+            magnet_text += " (FORCED)"
 
     cv2.putText(img, value_text, (18, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (50, 255, 80), 2)
     cv2.putText(img, magnet_text, (300, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (80, 220, 255), 2)
@@ -2107,8 +2762,7 @@ def draw_overlay(frame):
     cv2.putText(img, drawer_text[:78], (18, 154), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 230, 90), 1)
     target_text = (
         f"Temi: item={dd_item or '--'} "
-        f"drawer={dd_drawer if dd_drawer is not None else '--'} "
-        f"hand_released={dd_hand_released}"
+        f"drawer={dd_drawer if dd_drawer is not None else '--'}"
     )
     cv2.putText(img, target_text[:78], (18, 176), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 230, 90), 1)
     marker_text = marker.get("status", "marker: --")
@@ -2199,7 +2853,42 @@ def index():
       display: flex;
       gap: 8px;
       align-items: center;
+      flex-wrap: wrap;
       margin-top: 8px;
+    }
+    .debug-send-form {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) 72px auto auto;
+      gap: 8px;
+      align-items: end;
+      width: 100%;
+    }
+    .sensor-switch {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .sensor-button {
+      min-width: 0;
+      min-height: 36px;
+      border: 1px solid #33404a;
+      background: #131920;
+      color: #d8dee2;
+      border-radius: 6px;
+      padding: 7px 8px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .sensor-button:hover {
+      background: #202a32;
+      border-color: #4c5b66;
+    }
+    .sensor-button.active {
+      background: #1d3b2a;
+      border-color: #55b96b;
+      color: #f2f5f6;
+      font-weight: 700;
     }
     .action-button {
       border: 1px solid #33404a;
@@ -2238,6 +2927,46 @@ def index():
       width: 18px;
       height: 18px;
       accent-color: #51d8ff;
+    }
+    .wide { grid-column: 1 / -1; }
+    .scenario-form {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr)) auto;
+      gap: 8px;
+      align-items: end;
+    }
+    .field {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .field span {
+      color: #95a1aa;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .field input, .field select {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid #33404a;
+      background: #0f1317;
+      color: #f2f5f6;
+      border-radius: 6px;
+      padding: 7px 8px;
+      font: inherit;
+      font-size: 12px;
+    }
+    .debug-send-form .field input,
+    .debug-send-form .field select {
+      min-height: 34px;
+    }
+    .field.toggle-field {
+      align-self: center;
+      padding-top: 18px;
+    }
+    @media (max-width: 1100px) {
+      .scenario-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .debug-send-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     .side-panel {
       display: grid;
@@ -2296,6 +3025,14 @@ def index():
       <div class="status-grid">
         <div class="status-item"><span class="label">Camera</span><span id="camera" class="value">...</span></div>
         <div class="status-item">
+          <span class="label">Sensor Set</span>
+          <span class="sensor-switch" role="group" aria-label="Sensor set selector">
+            <button class="sensor-button active" data-sensor-set="1" type="button">1세트</button>
+            <button class="sensor-button" data-sensor-set="2" type="button">2세트</button>
+            <button class="sensor-button" data-sensor-set="3" type="button">3세트</button>
+          </span>
+        </div>
+        <div class="status-item">
           <span class="label">Load Cell</span>
           <span id="loadcell" class="value ok">...</span>
           <span class="loadcell-actions">
@@ -2303,7 +3040,19 @@ def index():
             <span id="loadcell-init-status" class="inline-status"></span>
           </span>
         </div>
-        <div class="status-item"><span class="label">Magnet</span><span id="magnet" class="value">...</span></div>
+        <div class="status-item wide"><span class="label">Load Cells</span><span id="loadcell-details" class="value">...</span></div>
+        <div class="status-item">
+          <span class="label">Magnet</span>
+          <span id="magnet" class="value">...</span>
+          <span class="loadcell-actions">
+            <select id="magnet-override" class="action-button">
+              <option value="real">Real</option>
+              <option value="closed">Force closed</option>
+              <option value="open">Force open</option>
+            </select>
+            <span id="magnet-override-status" class="inline-status"></span>
+          </span>
+        </div>
         <div class="status-item"><span class="label">Marker</span><span id="marker" class="value">...</span></div>
         <div class="status-item"><span class="label">YOLO</span><span id="yolo" class="value yolo">...</span></div>
         <div class="status-item"><span class="label">Hands</span><span id="hands" class="value">...</span></div>
@@ -2317,13 +3066,31 @@ def index():
         </div>
         <div class="status-item">
           <span class="label">Debug Logs</span>
-          <span class="loadcell-actions">
+          <div class="loadcell-actions debug-send-form">
+            <label class="field"><span>Time</span><input id="debug-success-time" type="datetime-local"></label>
+            <label class="field"><span>No.</span><select id="debug-success-drawer"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
             <button id="logs-toggle" class="action-button" type="button" aria-expanded="true">로그 닫기</button>
             <button id="debug-success-log" class="action-button" type="button">성공 전송</button>
             <span id="debug-success-status" class="inline-status"></span>
-          </span>
+          </div>
+        </div>
+        <div class="status-item wide">
+          <span class="label">Scenario Setup</span>
+          <div class="scenario-form">
+            <label class="field"><span>Server/IP</span><input id="scenario-server" type="text"></label>
+            <div class="field toggle-field"><span>Manual</span><label class="toggle"><input id="scenario-manual" type="checkbox"> Web target</label></div>
+            <label class="field"><span>Drawer</span><input id="scenario-drawer-label" type="text"></label>
+            <label class="field"><span>No.</span><input id="scenario-drawer-number" type="number" inputmode="numeric"></label>
+            <label class="field"><span>In/Out</span><select id="scenario-direction"><option value="in">in</option><option value="out">out</option></select></label>
+            <label class="field"><span>Weight</span><select id="scenario-weight-direction"><option value="up">up</option><option value="down">down</option><option value="either">either</option></select></label>
+            <label class="field"><span>Weight Sets</span><input id="scenario-weight-directions" type="text" placeholder="down,up,up"></label>
+            <label class="field"><span>Item</span><input id="scenario-item" type="text"></label>
+            <button id="scenario-save" class="action-button" type="button">저장</button>
+          </div>
+          <span id="scenario-save-status" class="inline-status"></span>
         </div>
         <div class="status-item"><span class="label">Comms</span><span id="comms" class="value warn">not configured</span></div>
+        <div class="status-item wide"><span class="label">Last Send</span><span id="last-send" class="value">...</span></div>
       </div>
     </section>
     <aside id="logs-panel" class="side-panel">
@@ -2358,6 +3125,137 @@ def index():
     </aside>
   </main>
   <script>
+    let selectedSensorSet = Number(localStorage.getItem('selectedSensorSet') || '1');
+    if (!Number.isInteger(selectedSensorSet) || selectedSensorSet < 1 || selectedSensorSet > 3) {
+      selectedSensorSet = 1;
+    }
+
+    function selectedIndex() {
+      return selectedSensorSet - 1;
+    }
+
+    function formatNumber(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return '--';
+      }
+      return Number(value).toFixed(0);
+    }
+
+    function formatSelectedLoadcell(data) {
+      const values = Array.isArray(data.loadcell_values) ? data.loadcell_values : [];
+      const appliedValues = Array.isArray(data.loadcell_applied_values) ? data.loadcell_applied_values : [];
+      const drawer = data.drawer_scenario || {};
+      const deltas = Array.isArray(drawer.weight_deltas) ? drawer.weight_deltas : [];
+      const liveDeltas = Array.isArray(data.loadcell_live_deltas) ? data.loadcell_live_deltas : [];
+      const liveEffectiveDeltas = Array.isArray(data.loadcell_live_effective_deltas) ? data.loadcell_live_effective_deltas : [];
+      const directions = Array.isArray(drawer.weight_directions)
+        ? drawer.weight_directions
+        : (Array.isArray(data.scenario_config?.weight_directions) ? data.scenario_config.weight_directions : []);
+      const value = values[selectedIndex()];
+      const appliedValue = appliedValues[selectedIndex()];
+      const direction = directions[selectedIndex()] || data.scenario_config?.weight_direction || 'up';
+      const delta = deltas[selectedIndex()];
+      const liveDelta = liveDeltas[selectedIndex()];
+      const liveEff = liveEffectiveDeltas[selectedIndex()];
+      const eff = liveEff ?? effectiveDelta(delta, direction);
+      let text = selectedSensorSet + '세트: ';
+      if (eff !== null && eff !== undefined) {
+        text += 'move=' + Number(eff).toFixed(0) + ' applied';
+        const shownDelta = liveDelta ?? delta;
+        if (shownDelta !== null && shownDelta !== undefined) {
+          text += ' / delta=' + Number(shownDelta).toFixed(0);
+        }
+      } else {
+        text += formatNumber(appliedValue) + ' applied';
+      }
+      if (value !== null && value !== undefined) {
+        text += ' / raw=' + formatNumber(value);
+      }
+      text += ' / ' + direction;
+      if (data.primary_sensor_index === selectedSensorSet) {
+        text += ' (검증 기준)';
+      }
+      if (appliedValue === null || appliedValue === undefined) {
+        text += ' / ' + (data.loadcell_status || 'waiting');
+      }
+      return text;
+    }
+
+    function effectiveDelta(delta, direction) {
+      if (delta === null || delta === undefined || Number.isNaN(Number(delta))) {
+        return null;
+      }
+      const value = Number(delta);
+      if (direction === 'down') {
+        return -value;
+      }
+      if (direction === 'either') {
+        return Math.abs(value);
+      }
+      return value;
+    }
+
+    function formatLoadcellDetails(data) {
+      const values = Array.isArray(data.loadcell_values) ? data.loadcell_values : [];
+      const appliedValues = Array.isArray(data.loadcell_applied_values) ? data.loadcell_applied_values : [];
+      const drawer = data.drawer_scenario || {};
+      const deltas = Array.isArray(drawer.weight_deltas) ? drawer.weight_deltas : [];
+      const liveDeltas = Array.isArray(data.loadcell_live_deltas) ? data.loadcell_live_deltas : [];
+      const liveEffectiveDeltas = Array.isArray(data.loadcell_live_effective_deltas) ? data.loadcell_live_effective_deltas : [];
+      const directions = Array.isArray(drawer.weight_directions)
+        ? drawer.weight_directions
+        : (Array.isArray(data.scenario_config?.weight_directions) ? data.scenario_config.weight_directions : []);
+      const threshold = drawer.weight_threshold ?? data.scenario_config?.weight_threshold;
+      const parts = [0, 1, 2].map((index) => {
+        const direction = directions[index] || data.scenario_config?.weight_direction || 'up';
+        const delta = liveDeltas[index] ?? deltas[index];
+        const eff = liveEffectiveDeltas[index] ?? effectiveDelta(delta, direction);
+        let text = `${index + 1}: ${formatNumber(appliedValues[index])} applied`;
+        if (values[index] !== null && values[index] !== undefined) {
+          text += ` raw=${formatNumber(values[index])}`;
+        }
+        text += ` ${direction}`;
+        if (delta !== null && delta !== undefined) {
+          text += ` delta=${Number(delta).toFixed(0)} eff=${Number(eff).toFixed(0)}`;
+        }
+        return text;
+      });
+      if (threshold !== null && threshold !== undefined) {
+        parts.push(`threshold=${Number(threshold).toFixed(0)}`);
+      }
+      return parts.join(' | ');
+    }
+
+    function formatSelectedMagnet(data) {
+      const detectedValues = Array.isArray(data.magnet_detected_values) ? data.magnet_detected_values : [];
+      const rawValues = Array.isArray(data.magnet_raw_values) ? data.magnet_raw_values : [];
+      const detected = detectedValues[selectedIndex()];
+      const raw = rawValues[selectedIndex()];
+      let state = '--';
+      if (detected !== null && detected !== undefined) {
+        state = detected ? 'DETECTED' : 'NOT_DETECTED';
+      }
+      let text = selectedSensorSet + '세트: ' + state;
+      if (raw !== null && raw !== undefined) {
+        text += ' / raw=' + raw;
+      }
+      if (data.primary_sensor_index === selectedSensorSet) {
+        text += ' (검증 기준)';
+      }
+      if (data.magnet_override && data.magnet_override !== 'real') {
+        text += ' / forced=' + data.magnet_override;
+      }
+      return text;
+    }
+
+    function updateSensorButtons() {
+      document.querySelectorAll('[data-sensor-set]').forEach((button) => {
+        const isActive = Number(button.dataset.sensorSet) === selectedSensorSet;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-pressed', String(isActive));
+      });
+    }
+
     function renderLog(channel, entries) {
       const logEl = document.getElementById(channel + '-log');
       const countEl = document.getElementById(channel + '-count');
@@ -2366,12 +3264,27 @@ def index():
       logEl.scrollTop = logEl.scrollHeight;
     }
 
+    function setFieldValue(id, value) {
+      const el = document.getElementById(id);
+      if (document.activeElement !== el) {
+        el.value = value ?? '';
+      }
+    }
+
     async function refreshStatus() {
       const res = await fetch('/status');
       const data = await res.json();
       document.getElementById('camera').textContent = data.camera_status;
-      document.getElementById('loadcell').textContent = data.loadcell_line;
-      document.getElementById('magnet').textContent = data.magnet_line;
+      updateSensorButtons();
+      document.getElementById('loadcell').textContent = formatSelectedLoadcell(data);
+      document.getElementById('loadcell-details').textContent = formatLoadcellDetails(data);
+      document.getElementById('magnet').textContent = formatSelectedMagnet(data);
+      if (data.magnet_override) {
+        const magnetOverride = document.getElementById('magnet-override');
+        if (document.activeElement !== magnetOverride) {
+          magnetOverride.value = data.magnet_override;
+        }
+      }
       if (data.drawer_marker) {
         let markerText = data.drawer_marker.status || '...';
         if (data.drawer_marker.mismatch) {
@@ -2397,15 +3310,30 @@ def index():
         if (drawer.current_drawer !== null && drawer.current_drawer !== undefined) {
           text += ' / drawer=' + drawer.current_drawer;
         }
-        text += ' / hand_released=' + !!drawer.hand_released;
         if (drawer.weight_delta !== null && drawer.weight_delta !== undefined) {
           text += ' / delta=' + Number(drawer.weight_delta).toFixed(1);
         }
         document.getElementById('comms').textContent = text;
+        document.getElementById('last-send').textContent = drawer.last_server_response || 'no server response yet';
       }
       document.getElementById('hand-toggle').checked = !!data.controls.hand_enabled;
       document.getElementById('yolo-toggle').checked = !!data.controls.yolo_enabled;
       document.getElementById('marker-toggle').checked = !!data.controls.marker_enabled;
+      if (data.scenario_config) {
+        setFieldValue('scenario-server', data.scenario_config.server_url);
+        document.getElementById('scenario-manual').checked = !!data.scenario_config.manual_active;
+        setFieldValue('scenario-drawer-label', data.scenario_config.drawer_label);
+        setFieldValue('scenario-drawer-number', data.scenario_config.drawer_number);
+        setFieldValue('scenario-direction', data.scenario_config.direction || 'in');
+        setFieldValue('scenario-weight-direction', data.scenario_config.weight_direction || 'up');
+        setFieldValue(
+          'scenario-weight-directions',
+          Array.isArray(data.scenario_config.weight_directions)
+            ? data.scenario_config.weight_directions.join(',')
+            : ''
+        );
+        setFieldValue('scenario-item', data.scenario_config.item_name);
+      }
     }
 
     async function refreshLogs() {
@@ -2425,8 +3353,20 @@ def index():
       await refreshLogs();
     }
 
+    function setDefaultDebugSuccessTime() {
+      const input = document.getElementById('debug-success-time');
+      if (!input || input.value) {
+        return;
+      }
+      const now = new Date();
+      now.setSeconds(0, 0);
+      const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+      input.value = local.toISOString().slice(0, 16);
+    }
+
     setInterval(refreshStatus, 1000);
     setInterval(refreshLogs, 2500);
+    setDefaultDebugSuccessTime();
     refreshAll();
 
     async function setControl(name, enabled) {
@@ -2436,6 +3376,45 @@ def index():
         body: JSON.stringify({ [name]: enabled })
       });
       refreshAll();
+    }
+
+    async function saveScenarioConfig() {
+      const button = document.getElementById('scenario-save');
+      const status = document.getElementById('scenario-save-status');
+      button.disabled = true;
+      status.textContent = '저장 중...';
+      const drawerNumber = document.getElementById('scenario-drawer-number').value;
+      try {
+        const res = await fetch('/scenario-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            server_url: document.getElementById('scenario-server').value,
+            manual_active: document.getElementById('scenario-manual').checked,
+            drawer_label: document.getElementById('scenario-drawer-label').value,
+            drawer_number: drawerNumber === '' ? null : Number(drawerNumber),
+            direction: document.getElementById('scenario-direction').value,
+            weight_direction: document.getElementById('scenario-weight-direction').value,
+            weight_directions: document.getElementById('scenario-weight-directions').value,
+            item_name: document.getElementById('scenario-item').value
+          })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'request failed');
+        }
+        status.textContent = '저장됨';
+      } catch (err) {
+        status.textContent = '실패: ' + err.message;
+      } finally {
+        button.disabled = false;
+        refreshAll();
+        setTimeout(() => {
+          if (!button.disabled && status.textContent !== '저장 중...') {
+            status.textContent = '';
+          }
+        }, 3500);
+      }
     }
 
     async function initLoadcell() {
@@ -2466,15 +3445,31 @@ def index():
     async function sendDebugSuccessLog() {
       const button = document.getElementById('debug-success-log');
       const status = document.getElementById('debug-success-status');
+      const timeInput = document.getElementById('debug-success-time');
+      const drawerSelect = document.getElementById('debug-success-drawer');
       button.disabled = true;
       status.textContent = '전송 중...';
       try {
-        const res = await fetch('/debug/temi-success', { method: 'POST' });
+        const payload = {
+          drawer_number: Number(drawerSelect.value)
+        };
+        if (timeInput.value) {
+          const selectedTime = new Date(timeInput.value);
+          if (Number.isNaN(selectedTime.getTime())) {
+            throw new Error('invalid time');
+          }
+          payload.timestamp = selectedTime.toISOString().replace('.000Z', 'Z');
+        }
+        const res = await fetch('/debug/temi-success', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
         const data = await res.json();
         if (!res.ok || !data.ok) {
           throw new Error(data.error || 'request failed');
         }
-        status.textContent = 'Temi 성공 전송됨';
+        status.textContent = `성공 전송됨: ${payload.drawer_number}`;
       } catch (err) {
         status.textContent = '실패: ' + err.message;
       } finally {
@@ -2488,8 +3483,46 @@ def index():
       }
     }
 
+    async function setMagnetOverride(mode) {
+      const status = document.getElementById('magnet-override-status');
+      status.textContent = '변경 중...';
+      try {
+        const res = await fetch('/magnet-override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'request failed');
+        }
+        status.textContent = '적용됨';
+      } catch (err) {
+        status.textContent = '실패: ' + err.message;
+      } finally {
+        refreshAll();
+        setTimeout(() => {
+          if (status.textContent !== '변경 중...') {
+            status.textContent = '';
+          }
+        }, 2500);
+      }
+    }
+
     document.getElementById('loadcell-init').addEventListener('click', initLoadcell);
     document.getElementById('debug-success-log').addEventListener('click', sendDebugSuccessLog);
+    document.getElementById('scenario-save').addEventListener('click', saveScenarioConfig);
+    document.getElementById('magnet-override').addEventListener('change', (event) => {
+      setMagnetOverride(event.target.value);
+    });
+    document.querySelectorAll('[data-sensor-set]').forEach((button) => {
+      button.addEventListener('click', () => {
+        selectedSensorSet = Number(button.dataset.sensorSet);
+        localStorage.setItem('selectedSensorSet', String(selectedSensorSet));
+        updateSensorButtons();
+        refreshStatus();
+      });
+    });
     document.getElementById('logs-toggle').addEventListener('click', () => {
       const panel = document.getElementById('logs-panel');
       const button = document.getElementById('logs-toggle');
@@ -2530,34 +3563,101 @@ def control():
     return jsonify(controls=get_model_controls())
 
 
+@app.route("/scenario-config", methods=["POST"])
+def scenario_config():
+    data = request.get_json(silent=True) or {}
+    try:
+        set_runtime_scenario_config(data)
+        return jsonify(ok=True, scenario_config=scenario_config_snapshot())
+    except Exception as exc:
+        add_log("comms", f"scenario config failed: {exc}")
+        return jsonify(ok=False, error=str(exc)), 400
+
+
 @app.route("/loadcell/init", methods=["POST"])
 def loadcell_init():
+    global loadcell_baseline_pending
     try:
+        with state_lock:
+            loadcell_baseline_pending = True
         source, result = init_loadcell_tare()
-        return jsonify(ok=True, source=source, result=result)
+        return jsonify(ok=True, source=source, result=result, software_baseline="pending")
     except Exception as exc:
+        with state_lock:
+            loadcell_baseline_pending = False
         add_log("loadcell", f"tare init failed: {exc}")
         return jsonify(ok=False, error=str(exc)), 503
 
 
+@app.route("/magnet-override", methods=["POST"])
+def magnet_override_route():
+    data = request.get_json(silent=True) or {}
+    try:
+        set_magnet_override(data.get("mode", "real"))
+        line, detected, mode = effective_magnet_state()
+        return jsonify(ok=True, mode=mode, magnet_line=line, magnet_detected=detected)
+    except Exception as exc:
+        add_log("magnet", f"override failed: {exc}")
+        return jsonify(ok=False, error=str(exc)), 400
+
+
 @app.route("/debug/temi-success", methods=["POST"])
 def debug_temi_success():
-    result = send_debug_temi_success_event()
+    data = request.get_json(silent=True) or {}
+    options = {}
+    if data.get("drawer_number") not in (None, ""):
+        try:
+            drawer_number = int(data.get("drawer_number"))
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="drawer_number must be 1, 2, or 3"), 400
+        if drawer_number not in {1, 2, 3}:
+            return jsonify(ok=False, error="drawer_number must be 1, 2, or 3"), 400
+        options["drawer_number"] = drawer_number
+    timestamp = str(data.get("timestamp") or "").strip()
+    if timestamp:
+        options["timestamp"] = timestamp
+    result = send_debug_temi_success_event(options)
     return jsonify(result), 200 if result.get("ok") else 503
 
 
 @app.route("/status")
 def status():
+    magnet_line, magnet_detected, magnet_mode = effective_magnet_state()
     with state_lock:
+        verification_sensor_index = (
+            drawer_selected_sensor_index + 1
+            if drawer_selected_sensor_index is not None
+            else PRIMARY_SENSOR_INDEX + 1
+        )
+        loadcell_values = list(latest_loadcell_values)
+        weight_directions = list(drawer_weight_directions)
+        live_weight_results = evaluate_sensor_weight_changes(
+            drawer_initial_weights,
+            loadcell_values,
+            weight_directions,
+        )
         return jsonify(
             controls=get_model_controls(),
             camera_status=camera_status,
             loadcell_status=loadcell_status,
+            loadcell_baseline_pending=loadcell_baseline_pending,
             loadcell_line=latest_loadcell_line,
             loadcell_value=latest_loadcell_value,
+            loadcell_values=loadcell_values,
+            loadcell_applied_values=applied_loadcell_values(loadcell_values, weight_directions),
+            loadcell_live_raw_deltas=[result["weight_delta"] for result in live_weight_results],
+            loadcell_live_deltas=[result["weight_effective_delta"] for result in live_weight_results],
+            loadcell_live_effective_deltas=[result["weight_effective_delta"] for result in live_weight_results],
+            primary_sensor_index=verification_sensor_index,
+            verification_sensor_index=verification_sensor_index,
             magnet_status=magnet_status,
-            magnet_line=latest_magnet_line,
-            magnet_detected=latest_magnet_detected,
+            magnet_line=magnet_line,
+            magnet_detected=magnet_detected,
+            magnet_detected_values=latest_magnet_detected_values,
+            magnet_raw_values=latest_magnet_raw_values,
+            magnet_override=magnet_mode,
+            magnet_raw_line=latest_magnet_line,
+            magnet_raw_detected=latest_magnet_detected,
             yolo_status=yolo_status,
             yolo_inference_ms=yolo_inference_ms,
             yolo_fps=yolo_fps,
@@ -2569,6 +3669,7 @@ def status():
             hands=latest_hands,
             drawer_scenario=drawer_snapshot(),
             drawer_marker=marker_snapshot(),
+            scenario_config=scenario_config_snapshot(),
         )
 
 

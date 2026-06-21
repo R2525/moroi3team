@@ -2,9 +2,9 @@
  * Arduino Uno Q Door + Camera + Load Cell Verification State Machine
  *
  * Hardware:
- * - HX711 DT  -> D3
- * - HX711 SCK -> D2
- * - Reed DO   -> D4
+ * - HX711 1 DT  -> D5
+ * - HX711 1 SCK -> D6
+ * - Reed 1 DO   -> D9
  * - Serial    -> 115200 baud
  *
  * Protocol to upper server:
@@ -15,9 +15,9 @@
 
 #include <HX711.h>
 
-const uint8_t LOADCELL_DOUT_PIN = 3;
-const uint8_t LOADCELL_SCK_PIN = 2;
-const uint8_t REED_SWITCH_PIN = 4;
+const uint8_t LOADCELL_DOUT_PIN = 5;
+const uint8_t LOADCELL_SCK_PIN = 6;
+const uint8_t REED_SWITCH_PIN = 9;
 
 // With INPUT_PULLUP, a common reed module/switch reads LOW when magnet is present.
 const int REED_CLOSED_LEVEL = LOW;

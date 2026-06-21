@@ -17,23 +17,24 @@ cd /home/arduino/ArduinoApps/roadchell
 - `/logs`: 로드셀, 자석, YOLO/NPU, 통신 로그를 채널별 JSON으로 제공
 - 카메라 자동 탐색: 기본값은 `/dev/video*` 중 읽을 수 있는 첫 장치
 - 로드셀 읽기:
-  - 기본은 Arduino RouterBridge의 `loadcell_read`
+  - 기본은 Arduino RouterBridge의 `loadcell_read_1`, `loadcell_read_2`, `loadcell_read_3`
+  - 기존 단일 센서 호환용 `loadcell_read`는 1번 HX711 값을 반환
   - Bridge가 없거나 실패하면 `/dev/ttyHS1` 시리얼로 읽기
 - 리드 스위치 자석 감지:
   - 센서 모듈: SZH-SSBH-040
-  - DO 핀: D4
-  - MCU Monitor에 0.5초마다 `Magnet: DETECTED` 또는 `Magnet: NOT_DETECTED` 로그 출력
-  - RouterBridge의 `magnet_read`로 Linux/Python 쪽에서도 상태 확인
-- YOLOv8 ONNX 추론:
-  - 모델: `data/input/yolov8n.onnx`
-  - 기본 백엔드: QNN HTP/NPU (`/dev/fastrpc-adsp`)
+  - DO 핀: D9, D10, D11
+  - MCU Monitor에 0.5초마다 1/2/3번 리드 상태 출력
+  - RouterBridge의 `magnet_read_1`, `magnet_read_2`, `magnet_read_3`로 Linux/Python 쪽에서도 상태 확인
+- YOLO TFLite 추론:
+  - 모델: `data/input/best_int8.tflite`
+  - 기본 백엔드: LiteRT/TFLite CPU (`litert_cpu`)
 - MediaPipe Hands 손 추적:
   - 설치되어 있으면 손 랜드마크를 오버레이
   - UNO Q의 현재 Python/aarch64 환경에서는 MediaPipe wheel이 없어 `MediaPipe not installed`로 표시될 수 있음
 - MCU 스케치:
   - `sketch/sketch.ino`
-  - HX711 로드셀을 읽고 `Bridge.provide("loadcell_read", read_loadcell)`로 Linux 쪽에 제공
-  - 리드 스위치를 읽고 `Bridge.provide("magnet_read", read_magnet)`로 Linux 쪽에 제공
+  - HX711 1/2/3 로드셀을 읽고 `Bridge.provide("loadcell_read_1" ... "_3")`로 Linux 쪽에 제공
+  - 리드 스위치 1/2/3을 읽고 `Bridge.provide("magnet_read_1" ... "_3")`로 Linux 쪽에 제공
 
 하드웨어 핀:
 
@@ -42,9 +43,15 @@ cd /home/arduino/ArduinoApps/roadchell
 - HX711 모듈: SZH-SSBH-016
 - VCC -> 5V
 - GND -> GND
-- DT -> D3
-- SCK -> D2
-- 리드 스위치 DO -> D4
+- HX711 1 DT -> D5
+- HX711 1 SCK -> D6
+- HX711 2 DT -> D7
+- HX711 2 SCK -> D8
+- HX711 3 DT -> D12
+- HX711 3 SCK -> D13
+- 리드 스위치 1 DO -> D9
+- 리드 스위치 2 DO -> D10
+- 리드 스위치 3 DO -> D11
 - 리드 스위치 VCC -> 3.3V
 - 리드 스위치 GND -> GND
 
@@ -101,8 +108,7 @@ App Lab 웹 화면에서는 오른쪽 로그 패널에 다음 채널이 따로 �
 리드 스위치 자석 감지 로그 예:
 
 ```text
-Reed Switch Raw: 0 / Magnet: DETECTED
-Reed Switch Raw: 1 / Magnet: NOT_DETECTED
+Reed Switches: 1=0(DETECTED) 2=1(NOT_DETECTED) 3=1(NOT_DETECTED)
 ```
 
 주의: App Lab 실행과 로컬 실행을 동시에 켜면 카메라나 로드셀 시리얼 장치를 동시에 잡아서 충돌할 수 있습니다.
@@ -120,7 +126,7 @@ cd /home/arduino/ArduinoApps/roadchell
 
 ```bash
 cd /home/arduino/ArduinoApps/roadchell
-YOLO_BACKEND=qnn_htp ONNX_REQUIRE_QNN_ONLY=0 venv/bin/python -c "from python import main; s=main.create_yolo_session(); print(s.get_providers())"
+YOLO_BACKEND=litert_cpu YOLO_MODEL=data/input/best_int8.tflite venv/bin/python -c "from python import main; r=main.create_yolo_runner(); print(r.runtime)"
 ```
 
 HTP/NPU 경로로 실행하려면 최소한 다음 조건이 필요합니다.
@@ -133,7 +139,8 @@ HTP/NPU 경로로 실행하려면 최소한 다음 조건이 필요합니다.
 현재 스크립트가 처리하는 항목:
 
 - `.cache/app-compose-overrides.yaml`의 `main` 서비스에 `c 10:* rmw` cgroup rule 추가
-- `YOLO_BACKEND=qnn_htp`
+- `YOLO_BACKEND=litert_cpu`
+- `YOLO_MODEL=data/input/best_int8.tflite`
 - `ONNX_REQUIRE_QNN_ONLY=0`
 - 컨테이너 내부 `/dev/fastrpc-adsp` 권한 열기
 
