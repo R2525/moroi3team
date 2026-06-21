@@ -137,12 +137,12 @@ public class MainActivity extends AppCompatActivity {
         currentPage = PAGE_HOME;
 
         LinearLayout page = basePage(K.HOME_TITLE, false);
-        LinearLayout menuRow = horizontal(page);
-        addMenuCard(menuRow, K.FIND_CARD_TITLE, v -> showFindPage());
-        addMenuCard(menuRow, K.REGISTER_CARD_TITLE, v -> showRegisterPage());
-        addMenuCard(menuRow, K.UPLOAD_CARD_TITLE, v -> showUploadPage());
-        addMenuCard(menuRow, K.DB_STATUS_CARD_TITLE, v -> checkDbStatus());
-        addMenuCard(menuRow, "설정", v -> showSettings());
+        page.addView(text("서랍 속 물건을 찾고 등록·수납하며 DB 상태를 확인합니다.", 26, "#657574", false), matchWrap(0, 18));
+        addNavCard(page, K.FIND_CARD_TITLE, "물건 이름으로 어느 서랍에 있는지 검색합니다.", v -> showFindPage());
+        addNavCard(page, K.REGISTER_CARD_TITLE, "물건명과 서랍 위치를 직접 등록합니다.", v -> showRegisterPage());
+        addNavCard(page, K.UPLOAD_CARD_TITLE, "휴대폰으로 QR을 찍어 사진으로 수납합니다.", v -> showUploadPage());
+        addNavCard(page, K.DB_STATUS_CARD_TITLE, "Temi가 서버·DB에 연결됐는지 확인합니다.", v -> checkDbStatus());
+        addNavCard(page, "설정", "API 키·외부 접속 IP 등을 설정합니다.", v -> showSettings());
         setPage(page);
         startHomeBatchWatch();
     }
@@ -558,17 +558,23 @@ public class MainActivity extends AppCompatActivity {
 
         LinearLayout cur = card(page);
         cur.addView(text("지금 넣을 물품", 24, "#657184", true));
+        int placedCount = Math.min(idx, total);
         if (current != null) {
+            int currentNo = Math.min(idx + 1, total);
+            cur.addView(text("총 " + total + "개 중 " + currentNo + "번째 넣는 중", 32, "#285E63", true));
             cur.addView(text(current.optInt("drawer_number") + "번 서랍에 " + current.optString("item_name") + " 넣기", 36, "#17202A", true));
             addInfoRow(cur, "수량", current.optInt("quantity", 1) + "개");
         } else {
             cur.addView(text("대기 중", 30, "#17202A", true));
         }
-        addInfoRow(cur, "진행률", Math.min(idx, total) + " / " + total);
-        if ("fail".equals(batch.optString("last_result"))) {
-            cur.addView(text("검증 실패 - 다시 넣어주세요.", 24, "#B42318", true));
+        addInfoRow(cur, "진행률", placedCount + " / " + total + " 완료");
+        boolean verifyOk = batch.optBoolean("verify_ok", true);
+        String verifyMsg = batch.optString("verify_message", "");
+        if (!verifyOk || "fail".equals(batch.optString("last_result"))) {
+            String reason = verifyMsg.length() > 0 ? verifyMsg : "검증 실패";
+            cur.addView(text("⚠ " + reason + " — 다시 넣어주세요.", 24, "#B42318", true));
         } else {
-            cur.addView(text("손 동작(잡음 → 펼침) + 무게 센서 확인을 기다리는 중...", 22, "#657184", false));
+            cur.addView(text("넣은 뒤 서랍·무게를 자동 검증합니다. 센서 확인 대기 중...", 22, "#657184", false));
         }
 
         LinearLayout list = card(page);
@@ -917,7 +923,7 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout basePage(String title, boolean showBack) {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(56), dp(38), dp(56), dp(34));
+        content.setPadding(dp(32), dp(24), dp(32), dp(24));
 
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
@@ -927,11 +933,11 @@ public class MainActivity extends AppCompatActivity {
         if (showBack) {
             Button back = new Button(this);
             back.setText("<");
-            back.setTextSize(30);
+            back.setTextSize(18);
             back.setTextColor(Color.parseColor("#17202A"));
             back.setBackground(bg("#FFFFFF", "#D7DEE8", 8));
             back.setOnClickListener(v -> onBackPressed());
-            header.addView(back, new LinearLayout.LayoutParams(dp(58), dp(58)));
+            header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(44)));
         }
 
         LinearLayout titleBox = new LinearLayout(this);
@@ -979,9 +985,9 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout card(LinearLayout parent) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(44), dp(36), dp(44), dp(36));
+        card.setPadding(dp(28), dp(22), dp(28), dp(22));
         card.setBackground(bg("#FFFFFF", "#D7DEE8", 10));
-        parent.addView(card, matchWrap(0, 24));
+        parent.addView(card, matchWrap(0, 16));
         return card;
     }
 
@@ -1022,23 +1028,48 @@ public class MainActivity extends AppCompatActivity {
         parent.addView(card, params);
     }
 
+    // MyApplication2 스타일 카드: 굵은 제목 + 회색 설명 + 청록 "열기" 버튼
+    private void addNavCard(LinearLayout parent, String title, String description, View.OnClickListener listener) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(26), dp(20), dp(26), dp(20));
+        card.setBackground(bg("#FFFFFF", "#D8E0DE", 10));
+
+        card.addView(text(title, 38, "#172322", true));
+        TextView descView = text(description, 26, "#657574", false);
+        descView.setPadding(0, dp(4), 0, dp(14));
+        card.addView(descView);
+
+        Button open = new Button(this);
+        open.setText("열기");
+        open.setAllCaps(false);
+        open.setTextSize(17);
+        open.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        open.setTextColor(Color.WHITE);
+        open.setBackground(bg("#285E63", "#285E63", 8));
+        open.setOnClickListener(listener);
+        card.addView(open, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)));
+
+        parent.addView(card, matchWrap(0, 14));
+    }
+
     private void addButton(LinearLayout parent, String label, boolean primary, View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(26);
+        button.setTextSize(17);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         button.setTextColor(primary ? Color.WHITE : Color.parseColor("#17202A"));
-        button.setBackground(primary ? bg("#1E40AF", "#1E40AF", 8) : bg("#FFFFFF", "#D7DEE8", 8));
+        button.setBackground(primary ? bg("#285E63", "#285E63", 8) : bg("#FFFFFF", "#D7DEE8", 8));
         button.setOnClickListener(listener);
 
         LinearLayout.LayoutParams params;
         if (parent.getOrientation() == LinearLayout.HORIZONTAL) {
-            params = new LinearLayout.LayoutParams(0, dp(92), 1);
-            params.setMargins(dp(10), 0, dp(10), 0);
+            params = new LinearLayout.LayoutParams(0, dp(58), 1);
+            params.setMargins(dp(8), 0, dp(8), 0);
         } else {
-            params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(92));
-            params.setMargins(0, 0, 0, dp(16));
+            params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58));
+            params.setMargins(0, 0, 0, dp(12));
         }
         parent.addView(button, params);
     }
@@ -1047,7 +1078,7 @@ public class MainActivity extends AppCompatActivity {
         EditText editText = new EditText(this);
         editText.setHint(hint);
         editText.setSingleLine(true);
-        editText.setTextSize(30);
+        editText.setTextSize(19);
         editText.setTextColor(Color.parseColor("#17202A"));
         editText.setHintTextColor(Color.parseColor("#98A2B3"));
         editText.setPadding(dp(20), 0, dp(20), 0);
@@ -1083,10 +1114,13 @@ public class MainActivity extends AppCompatActivity {
         parent.addView(guide, matchHeight(72, 18, 0));
     }
 
+    // Temi 대형 화면 기준으로 잡힌 글자 크기를 일반 화면에 맞게 전역 축소한다.
+    private static final float UI_TEXT_SCALE = 0.6f;
+
     private TextView text(String value, int size, String color, boolean bold) {
         TextView textView = new TextView(this);
         textView.setText(value);
-        textView.setTextSize(size);
+        textView.setTextSize(size * UI_TEXT_SCALE);
         textView.setTextColor(Color.parseColor(color));
         textView.setTypeface(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL);
         textView.setIncludeFontPadding(true);

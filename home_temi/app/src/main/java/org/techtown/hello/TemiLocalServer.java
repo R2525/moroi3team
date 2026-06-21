@@ -36,6 +36,10 @@ public class TemiLocalServer {
     private static final int LOG_CAPACITY = 100;
     private final java.util.ArrayDeque<JSONObject> sensorLog = new java.util.ArrayDeque<>();
 
+    // 시간 비교: 진행 신호가 너무 짧은 간격으로 중복 도착하면 한 번만 처리한다.
+    private static final long PLACEMENT_DEBOUNCE_MS = 800;
+    private volatile long lastPlacementAdvanceTs = 0;
+
     public TemiLocalServer(Context context, TemiDbHelper db) {
         this.context = context.getApplicationContext();
         this.db = db;
@@ -154,12 +158,34 @@ public class TemiLocalServer {
                 addSensorLog(body);
                 String type = body.optString("event_type", body.optString("type")).trim();
                 String upperType = type.toUpperCase();
-                if (upperType.contains("VERIFY_SUCCESS") || "success".equalsIgnoreCase(type)) {
-                    // Uno Q: 카메라 YOLO + 로드셀 둘 다 만족 → 현재 물품 완료, 다음으로 진행
-                    writeJson(socket, 200, db.advancePlacement("success"));
-                } else if (upperType.contains("VERIFY_FAIL") || "fail".equalsIgnoreCase(type)) {
+                boolean isAdvance = upperType.contains("VERIFY_SUCCESS")
+                        || "success".equalsIgnoreCase(type)
+                        || upperType.contains("SEQUENCE_COMPLETED"); // 로드셀 적재 완료 신호
+                boolean isFail = upperType.contains("VERIFY_FAIL") || "fail".equalsIgnoreCase(type);
+                if (isAdvance) {
+                    // Uno Q: 카메라/로드셀 적재 완료 → 현재 물품(순서)을 placed로 진행.
+                    // 시간 비교: 직전 진행과 너무 가까우면 중복으로 보고 무시한다.
+                    long nowTs = System.currentTimeMillis();
+                    if (nowTs - lastPlacementAdvanceTs < PLACEMENT_DEBOUNCE_MS) {
+                        writeJson(socket, 200, new JSONObject()
+                                .put("ignored", true)
+                                .put("message", "중복 로그 무시 (시간 비교)"));
+                    } else {
+                        lastPlacementAdvanceTs = nowTs;
+                        // 검증 단계: 보고된 서랍번호/무게를 기대값과 대조 후 진행/실패 판정
+                        int reportedDrawer = body.optInt("drawer_number", 0);
+                        Double weight = null;
+                        if (body.has("value")) {
+                            weight = body.optDouble("value");
+                        } else if (body.has("weight_delta")) {
+                            weight = body.optDouble("weight_delta");
+                        }
+                        writeJson(socket, 200, db.verifyAndAdvancePlacement(reportedDrawer, weight));
+                    }
+                } else if (isFail) {
                     writeJson(socket, 200, db.advancePlacement("fail"));
                 } else {
+                    // weight_changed 등 그 외 센서값은 기록만 한다.
                     Double value = body.has("value") ? body.optDouble("value") : null;
                     writeJson(socket, 201, db.recordSensorEvent(body.optInt("drawer_number"), type, value));
                 }

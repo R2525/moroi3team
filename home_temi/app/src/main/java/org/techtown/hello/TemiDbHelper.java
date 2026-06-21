@@ -249,6 +249,8 @@ public class TemiDbHelper extends SQLiteOpenHelper {
 
     public synchronized JSONObject createPlacementBatch(JSONArray items) throws JSONException {
         long now = System.currentTimeMillis();
+        lastVerifyOk = true;
+        lastVerifyMessage = "";
         SQLiteDatabase db = getWritableDatabase();
         db.execSQL("UPDATE placement_batches SET status = 'cancelled' WHERE status = 'active'");
         db.execSQL("INSERT INTO placement_batches(status, current_index, created_at) VALUES('active', 0, ?)",
@@ -321,7 +323,56 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         batch.put("total", items.length());
         int idx = batch.getInt("current_index");
         batch.put("current", idx >= 0 && idx < items.length() ? items.getJSONObject(idx) : JSONObject.NULL);
+        batch.put("verify_ok", lastVerifyOk);
+        batch.put("verify_message", lastVerifyMessage);
         return batch;
+    }
+
+    // 마지막 검증 결과 (UI에 사유 표시용). 새 배치 시작 시 초기화.
+    private boolean lastVerifyOk = true;
+    private String lastVerifyMessage = "";
+    private static final double WEIGHT_MIN_DELTA = 1.0; // 로드셀 무게 변화 최소값(이상이어야 통과)
+
+    /**
+     * 넣은 뒤 검증 단계: 보고된 서랍번호/무게를 현재 물품의 기대값과 대조한 뒤 진행한다.
+     * - 서랍 불일치 또는 무게 부족 → fail 처리("다시 넣어주세요" + 사유)
+     * - 통과 → success 진행
+     */
+    public synchronized JSONObject verifyAndAdvancePlacement(int reportedDrawer, Double weight) throws JSONException {
+        JSONObject batch = getActivePlacementBatch();
+        if (batch == null) {
+            return new JSONObject().put("active", false).put("message", "진행 중인 수납이 없습니다.");
+        }
+        JSONObject current = batch.optJSONObject("current");
+        int expectedDrawer = current == null ? 0 : current.optInt("drawer_number", 0);
+        String expectedName = current == null ? "" : current.optString("item_name", "");
+
+        // 1) 서랍 번호 대조
+        if (reportedDrawer > 0 && expectedDrawer > 0 && reportedDrawer != expectedDrawer) {
+            lastVerifyOk = false;
+            lastVerifyMessage = expectedName + "은 " + expectedDrawer + "번 서랍에 넣어야 합니다 ("
+                    + reportedDrawer + "번에서 감지됨)";
+            JSONObject fail = advancePlacement("fail");
+            fail.put("verify", new JSONObject().put("ok", false).put("reason", lastVerifyMessage));
+            return fail;
+        }
+        // 2) 무게 임계 검증 (무게가 함께 보고된 경우에만)
+        if (weight != null && weight < WEIGHT_MIN_DELTA) {
+            lastVerifyOk = false;
+            lastVerifyMessage = "무게 변화가 감지되지 않았습니다 (" + weight + ")";
+            JSONObject fail = advancePlacement("fail");
+            fail.put("verify", new JSONObject().put("ok", false).put("reason", lastVerifyMessage));
+            return fail;
+        }
+        // 통과
+        lastVerifyOk = true;
+        lastVerifyMessage = "";
+        JSONObject ok = advancePlacement("success");
+        ok.put("verify", new JSONObject()
+                .put("ok", true)
+                .put("drawer", expectedDrawer)
+                .put("weight", weight == null ? JSONObject.NULL : weight));
+        return ok;
     }
 
     /**
@@ -349,23 +400,25 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         if (idx >= 0 && idx < items.length()) {
             JSONObject current = items.getJSONObject(idx);
             String newStatus = "skip".equals(result) ? "skipped" : "placed";
+            // 순서대로 현재 물품을 placed로 표시 + 넣은 시각(now) 기록.
+            // 실제 Temi DB 저장은 여기서 하지 않고 마지막 단계에서 일괄 커밋한다.
             db.execSQL("UPDATE placement_items SET status = ?, updated_at = ? WHERE id = ?",
                     new Object[]{newStatus, now, current.getInt("id")});
-            if ("placed".equals(newStatus)) {
-                savePlacement(current.getString("item_name"), current.optInt("drawer_number"),
-                        current.optInt("quantity", 1), "placement");
-            }
         }
 
         int nextIdx = idx + 1;
         db.execSQL("UPDATE placement_batches SET current_index = ? WHERE id = ?", new Object[]{nextIdx, batchId});
         if (nextIdx >= items.length()) {
+            // === 마지막 단계: 순서(seq)·시간(updated_at) 검증 후 실제 Temi DB에 일괄 커밋 ===
+            JSONObject commit = commitPlacementBatch(batchId);
             db.execSQL("UPDATE placement_batches SET status = 'completed', completed_at = ? WHERE id = ?",
                     new Object[]{now, batchId});
             JSONObject done = new JSONObject();
             done.put("active", false);
             done.put("completed", true);
-            done.put("message", "모든 물품 수납 완료");
+            done.put("message", "모든 물품 수납 완료 · Temi DB " + commit.optInt("committed") + "건 저장"
+                    + (commit.optBoolean("time_order_ok", true) ? "" : " (경고: 시간 순서 역전)"));
+            done.put("commit", commit);
             done.put("batch", buildBatch(batchId));
             return done;
         }
@@ -376,6 +429,49 @@ public class TemiDbHelper extends SQLiteOpenHelper {
 
     public synchronized void cancelActivePlacementBatch() {
         getWritableDatabase().execSQL("UPDATE placement_batches SET status = 'cancelled' WHERE status = 'active'");
+    }
+
+    // 마지막 단계: placement_items를 순서(seq)대로 읽어 시간(updated_at) 순서를 검증하고,
+    // placed 상태인 물품만 실제 Temi DB(items 테이블)에 일괄 저장한다.
+    private JSONObject commitPlacementBatch(int batchId) throws JSONException {
+        SQLiteDatabase db = getWritableDatabase();
+        Cursor c = db.rawQuery(
+                "SELECT item_name, drawer_number, quantity, status, updated_at "
+                        + "FROM placement_items WHERE batch_id = ? ORDER BY seq",
+                new String[]{String.valueOf(batchId)});
+        int committed = 0;
+        long prevTs = 0;
+        boolean timeOrderOk = true;
+        JSONArray saved = new JSONArray();
+        try {
+            while (c.moveToNext()) {
+                String status = c.getString(c.getColumnIndexOrThrow("status"));
+                if (!"placed".equals(status)) {
+                    continue; // 건너뛴(skipped) 물품은 저장하지 않음
+                }
+                long ts = c.getLong(c.getColumnIndexOrThrow("updated_at"));
+                if (ts < prevTs) {
+                    timeOrderOk = false; // 넣은 시각이 순서를 거스르면 경고
+                }
+                prevTs = ts;
+                String name = c.getString(c.getColumnIndexOrThrow("item_name"));
+                int drawer = c.getInt(c.getColumnIndexOrThrow("drawer_number"));
+                int qty = c.getInt(c.getColumnIndexOrThrow("quantity"));
+                savePlacement(name, drawer, qty, "placement");
+                saved.put(new JSONObject()
+                        .put("item_name", name)
+                        .put("drawer_number", drawer)
+                        .put("quantity", qty)
+                        .put("placed_at", ts));
+                committed++;
+            }
+        } finally {
+            c.close();
+        }
+        return new JSONObject()
+                .put("committed", committed)
+                .put("time_order_ok", timeOrderOk)
+                .put("items", saved);
     }
 
     private JSONObject itemFromCursor(Cursor cursor) throws JSONException {
