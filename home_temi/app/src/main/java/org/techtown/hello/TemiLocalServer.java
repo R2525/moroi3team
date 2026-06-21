@@ -32,6 +32,10 @@ public class TemiLocalServer {
     private ServerSocket serverSocket;
     private volatile boolean running;
 
+    // Uno Q가 보내는 sensor-event를 실시간으로 보기 위한 인메모리 링버퍼 (최신이 앞)
+    private static final int LOG_CAPACITY = 100;
+    private final java.util.ArrayDeque<JSONObject> sensorLog = new java.util.ArrayDeque<>();
+
     public TemiLocalServer(Context context, TemiDbHelper db) {
         this.context = context.getApplicationContext();
         this.db = db;
@@ -68,6 +72,40 @@ public class TemiLocalServer {
 
     public String getBaseUrl() {
         return "http://" + getLocalIpAddress() + ":" + PORT;
+    }
+
+    private synchronized void addSensorLog(JSONObject body) {
+        try {
+            JSONObject entry = new JSONObject();
+            entry.put("ts", System.currentTimeMillis());
+            entry.put("event_type", body.optString("event_type", body.optString("type", "")).trim());
+            entry.put("drawer_number", body.optInt("drawer_number", 0));
+            if (body.has("value")) {
+                entry.put("value", body.optDouble("value"));
+            }
+            entry.put("raw", body.toString());
+            sensorLog.addFirst(entry);
+            while (sensorLog.size() > LOG_CAPACITY) {
+                sensorLog.removeLast();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    public synchronized JSONArray recentSensorLog(int limit) {
+        JSONArray arr = new JSONArray();
+        int n = 0;
+        for (JSONObject entry : sensorLog) {
+            if (n++ >= limit) {
+                break;
+            }
+            arr.put(entry);
+        }
+        return arr;
+    }
+
+    public synchronized void clearSensorLog() {
+        sensorLog.clear();
     }
 
     private void handle(Socket socket) {
@@ -109,8 +147,11 @@ public class TemiLocalServer {
             } else if ("GET".equals(request.method) && "/api/storage-sessions/current".equals(path)) {
                 JSONObject session = db.getActiveStorageSession();
                 writeJson(socket, 200, session == null ? new JSONObject().put("active", false) : session.put("active", true));
+            } else if ("GET".equals(request.method) && "/api/sensor-events/recent".equals(path)) {
+                writeJson(socket, 200, new JSONObject().put("events", recentSensorLog(LOG_CAPACITY)));
             } else if ("POST".equals(request.method) && "/api/sensor-events".equals(path)) {
                 JSONObject body = new JSONObject(request.bodyAsString());
+                addSensorLog(body);
                 String type = body.optString("event_type", body.optString("type")).trim();
                 String upperType = type.toUpperCase();
                 if (upperType.contains("VERIFY_SUCCESS") || "success".equalsIgnoreCase(type)) {

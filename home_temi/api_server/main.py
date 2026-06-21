@@ -790,8 +790,35 @@ def get_user(user_id: int) -> dict:
 
 
 @app.get("/api/items/search")
-def search_item(name: str = Query(min_length=1)) -> dict:
+def search_item(name: str = Query("")) -> dict:
     keyword = name.strip()
+    # 이름이 비어 있으면 전체 보관 목록을 {items:[...]} 형태로 반환 (앱 DB 목록 새로고침용).
+    if not keyword:
+        with connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    i.name AS item_name,
+                    p.quantity,
+                    l.name AS drawer_name,
+                    l.drawer_number
+                FROM item i
+                JOIN item_placement p ON p.item_id = i.id
+                JOIN storage_location l ON l.id = p.storage_location_id
+                ORDER BY l.drawer_number, i.name
+                """
+            ).fetchall()
+        return {
+            "items": [
+                {
+                    "item_name": r["item_name"],
+                    "quantity": r["quantity"],
+                    "drawer_name": r["drawer_name"],
+                    "drawer_number": r["drawer_number"],
+                }
+                for r in rows
+            ]
+        }
     with connect() as conn:
         row = conn.execute(
             """

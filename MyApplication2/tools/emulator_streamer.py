@@ -4,7 +4,7 @@ import subprocess
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-ADB_PATH = r"C:\Users\t3p0u\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+ADB_PATH = r"C:\Users\yulee\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 HOST = '0.0.0.0'
 PORT = 8080
 CAPTURE_INTERVAL = 0.5

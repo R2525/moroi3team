@@ -46,9 +46,11 @@ public class MainActivity extends AppCompatActivity {
     private static final String PAGE_PLACEMENT = "PLACEMENT";
     private static final String PAGE_COMPLETE = "COMPLETE";
     private static final String PAGE_SETTINGS = "SETTINGS";
+    private static final String PAGE_LOG = "LOG";
 
     private static final String PREFS_NAME = "temi_settings";
     private static final String PREF_API_KEY = "gemini_api_key";
+    private static final String PREF_PUBLIC_IP = "public_ip_override";
 
     private FrameLayout pageRoot;
     private TemiDbHelper localDb;
@@ -64,6 +66,8 @@ public class MainActivity extends AppCompatActivity {
     private final Handler placementHandler = new Handler();
     private Runnable placementPoller;
     private Runnable homeBatchWatcher;
+    private Runnable logPoller;
+    private LinearLayout logContainer;
     private int placementShownIndex = -1;
 
     @Override
@@ -389,8 +393,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void showUploadPage() {
         currentPage = PAGE_UPLOAD;
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
         localServerUrl = localServer.getBaseUrl();
-        String uploadUrl = localServerUrl + "/upload";
+        String uploadUrl = publicIp.isEmpty() ? localServerUrl + "/upload" : "http://" + publicIp + ":" + TemiLocalServer.PORT + "/upload";
 
         LinearLayout page = basePage(K.UPLOAD_TITLE, true);
         LinearLayout resultCard = card(page);
@@ -707,20 +713,110 @@ public class MainActivity extends AppCompatActivity {
         settingsCard.addView(keyInput, matchHeight(76, 18, 6));
         settingsCard.addView(text("키를 저장하면 사진 업로드 시 물품/서랍/순서가 자동 인식됩니다.", 22, "#657184", false));
 
+        settingsCard.addView(text("외부 접속 IP (에뮬레이터용)", 26, "#657184", true));
+        settingsCard.addView(text("에뮬레이터 사용 시 PC의 LAN IP(예: 172.17.x.x)를 입력하면 QR 코드가 해당 주소로 생성됩니다.", 22, "#657184", false));
+        String currentIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
+        EditText ipInput = input("PC LAN IP 입력 (예: 172.17.67.17)");
+        ipInput.setText(currentIp);
+        settingsCard.addView(ipInput, matchHeight(76, 18, 6));
+
         LinearLayout row = horizontal(page);
-        addButton(row, "키 지우기", false, v -> {
-            prefs.edit().remove(PREF_API_KEY).apply();
-            toast("Gemini 키를 삭제했습니다.");
+        addButton(row, "초기화", false, v -> {
+            prefs.edit().remove(PREF_API_KEY).remove(PREF_PUBLIC_IP).apply();
+            toast("설정을 초기화했습니다.");
             showSettings();
         });
         addButton(row, "저장", true, v -> {
             String key = keyInput.getText().toString().trim();
-            prefs.edit().putString(PREF_API_KEY, key).apply();
-            toast(key.length() == 0 ? "키를 비웠습니다." : "Gemini 키를 저장했습니다.");
+            String ip = ipInput.getText().toString().trim();
+            prefs.edit().putString(PREF_API_KEY, key).putString(PREF_PUBLIC_IP, ip).apply();
+            toast("설정을 저장했습니다.");
             showSettings();
         });
+        addButton(page, "실시간 센서 로그 보기", false, v -> showSensorLog());
         addButton(page, K.HOME_BUTTON, false, v -> showHome());
         setPage(page);
+    }
+
+    // Uno Q가 8088로 보내는 sensor-event를 실시간으로 보여주는 화면
+    private void showSensorLog() {
+        currentPage = PAGE_LOG;
+        LinearLayout page = basePage("실시간 센서 로그", true);
+
+        LinearLayout infoCard = card(page);
+        infoCard.addView(text("Uno Q → " + localServer.getBaseUrl() + "/api/sensor-events", 22, "#657184", false));
+        infoCard.addView(text("1초마다 갱신 · 최근 100건 (최신순)", 22, "#657184", false));
+
+        LinearLayout logCard = card(page);
+        logContainer = new LinearLayout(this);
+        logContainer.setOrientation(LinearLayout.VERTICAL);
+        logCard.addView(logContainer);
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "로그 지우기", false, v -> {
+            localServer.clearSensorLog();
+            refreshSensorLog();
+        });
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+
+        startLogPolling();
+    }
+
+    private void refreshSensorLog() {
+        if (logContainer == null) {
+            return;
+        }
+        logContainer.removeAllViews();
+        JSONArray events = localServer.recentSensorLog(100);
+        if (events.length() == 0) {
+            logContainer.addView(text("아직 수신된 로그가 없습니다.", 26, "#657184", false));
+            return;
+        }
+        java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault());
+        for (int i = 0; i < events.length(); i++) {
+            JSONObject e = events.optJSONObject(i);
+            if (e == null) {
+                continue;
+            }
+            String type = e.optString("event_type", "");
+            String time = fmt.format(new java.util.Date(e.optLong("ts")));
+            int drawer = e.optInt("drawer_number", 0);
+            StringBuilder line = new StringBuilder(time).append("   ").append(type.isEmpty() ? "(no type)" : type);
+            if (drawer > 0) {
+                line.append("  · ").append(drawer).append("번 서랍");
+            }
+            if (e.has("value")) {
+                line.append("  · ").append(e.optDouble("value"));
+            }
+            String color = type.contains("VERIFY_SUCCESS") ? "#0F7A3B"
+                    : type.contains("VERIFY_FAIL") ? "#B42318" : "#17202A";
+            TextView row = text(line.toString(), 24, color, type.startsWith("VERIFY"));
+            row.setPadding(0, dp(10), 0, dp(10));
+            logContainer.addView(row);
+        }
+    }
+
+    private void startLogPolling() {
+        stopLogPolling();
+        logPoller = new Runnable() {
+            @Override
+            public void run() {
+                if (!PAGE_LOG.equals(currentPage)) {
+                    return;
+                }
+                refreshSensorLog();
+                placementHandler.postDelayed(this, 1000);
+            }
+        };
+        placementHandler.post(logPoller);
+    }
+
+    private void stopLogPolling() {
+        if (logPoller != null) {
+            placementHandler.removeCallbacks(logPoller);
+            logPoller = null;
+        }
     }
 
     private String maskKey(String key) {
