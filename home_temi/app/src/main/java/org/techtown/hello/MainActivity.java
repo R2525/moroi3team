@@ -25,15 +25,23 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
 import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.common.BitMatrix;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PAGE_HOME = "HOME";
@@ -47,6 +55,14 @@ public class MainActivity extends AppCompatActivity {
     private static final String PAGE_COMPLETE = "COMPLETE";
     private static final String PAGE_SETTINGS = "SETTINGS";
     private static final String PAGE_LOG = "LOG";
+    private static final String PAGE_SHOPPING_QR = "SHOPPING_QR";
+
+    private static final int SHOPPING_STORE_ID = 1;
+    private static final int SHOPPING_TRANSFER_ID = 5;
+    private static final String[] SHOPPING_API_BASE_URLS = {
+            "http://127.0.0.1:8000",
+            "http://10.0.2.2:8000"
+    };
 
     private static final String PREFS_NAME = "temi_settings";
     private static final String PREF_API_KEY = "gemini_api_key";
@@ -143,8 +159,115 @@ public class MainActivity extends AppCompatActivity {
         addMenuCard(menuRow, K.UPLOAD_CARD_TITLE, v -> showUploadPage());
         addMenuCard(menuRow, K.DB_STATUS_CARD_TITLE, v -> checkDbStatus());
         addMenuCard(menuRow, "설정", v -> showSettings());
+
+        LinearLayout shoppingRow = horizontal(page);
+        addMenuCard(shoppingRow, K.SHOPPING_QR_CARD_TITLE, v -> loadShoppingQr());
         setPage(page);
         startHomeBatchWatch();
+    }
+
+    private void loadShoppingQr() {
+        currentPage = PAGE_SHOPPING_QR;
+        showSimpleLoading(K.SHOPPING_QR_TITLE, K.SHOPPING_QR_LOADING);
+        new Thread(() -> {
+            try {
+                String payload = fetchShoppingQrPayload();
+                runOnUiThread(() -> showShoppingQr(payload));
+            } catch (Exception e) {
+                runOnUiThread(() -> showSimpleError(K.SHOPPING_QR_TITLE, K.SHOPPING_QR_LOAD_FAILED));
+            }
+        }).start();
+    }
+
+    private String fetchShoppingQrPayload() throws Exception {
+        Exception lastError = null;
+        for (String baseUrl : SHOPPING_API_BASE_URLS) {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(baseUrl + "/api/stores/" + SHOPPING_STORE_ID
+                        + "/transfers/" + SHOPPING_TRANSFER_ID);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(2500);
+                connection.setReadTimeout(2500);
+                int code = connection.getResponseCode();
+                String body = readResponse(code >= 200 && code < 300
+                        ? connection.getInputStream() : connection.getErrorStream());
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException("API " + code);
+                }
+
+                JSONObject response = new JSONObject(body);
+                JSONArray sourceItems = response.optJSONArray("items");
+                if (sourceItems == null || sourceItems.length() == 0) {
+                    throw new IllegalStateException(K.SHOPPING_QR_EMPTY);
+                }
+
+                JSONObject payload = new JSONObject();
+                payload.put("type", "temi_shopping_list");
+                payload.put("version", 1);
+                payload.put("transfer_id", response.optInt("transfer_id", SHOPPING_TRANSFER_ID));
+                JSONArray items = new JSONArray();
+                for (int i = 0; i < sourceItems.length(); i++) {
+                    JSONObject source = sourceItems.getJSONObject(i);
+                    JSONObject item = new JSONObject();
+                    item.put("item_name", source.optString("item_name", ""));
+                    item.put("quantity", source.optInt("quantity", 1));
+                    item.put("in_stock", source.optBoolean("in_stock", false));
+                    item.put("section", source.isNull("section")
+                            ? JSONObject.NULL : source.optString("section", ""));
+                    items.put(item);
+                }
+                payload.put("items", items);
+                return payload.toString();
+            } catch (Exception e) {
+                lastError = e;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }
+        throw lastError == null ? new IllegalStateException(K.SHOPPING_QR_LOAD_FAILED) : lastError;
+    }
+
+    private String readResponse(InputStream stream) throws Exception {
+        if (stream == null) {
+            return "";
+        }
+        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
+        StringBuilder body = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            body.append(line);
+        }
+        reader.close();
+        return body.toString();
+    }
+
+    private void showShoppingQr(String payload) {
+        currentPage = PAGE_SHOPPING_QR;
+        LinearLayout page = basePage(K.SHOPPING_QR_TITLE, true);
+        LinearLayout qrCard = card(page);
+        qrCard.setGravity(Gravity.CENTER);
+
+        TextView guide = text(K.SHOPPING_QR_GUIDE, 27, "#657184", false);
+        guide.setGravity(Gravity.CENTER);
+        guide.setPadding(0, 0, 0, dp(18));
+        qrCard.addView(guide);
+
+        try {
+            ImageView qrView = new ImageView(this);
+            qrView.setImageBitmap(createQrBitmap(payload, 650));
+            qrView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            qrCard.addView(qrView, new LinearLayout.LayoutParams(dp(650), dp(650)));
+        } catch (Exception e) {
+            showSimpleError(K.SHOPPING_QR_TITLE, K.SHOPPING_QR_CREATE_FAILED);
+            return;
+        }
+
+        addButton(page, K.HOME_BUTTON, false, v -> showHome());
+        setPage(page);
     }
 
     private void showFindPage() {
@@ -852,7 +975,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private Bitmap createQrBitmap(String text, int size) throws Exception {
-        BitMatrix matrix = new MultiFormatWriter().encode(text, BarcodeFormat.QR_CODE, size, size);
+        Map<EncodeHintType, Object> hints = new EnumMap<>(EncodeHintType.class);
+        hints.put(EncodeHintType.CHARACTER_SET, "UTF-8");
+        BitMatrix matrix = new MultiFormatWriter().encode(
+                text, BarcodeFormat.QR_CODE, size, size, hints);
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
         for (int x = 0; x < size; x++) {
             for (int y = 0; y < size; y++) {
@@ -1240,5 +1366,12 @@ public class MainActivity extends AppCompatActivity {
         static final String LATEST_UPLOAD_TITLE = "\uCD5C\uC2E0 \uC5C5\uB85C\uB4DC";
         static final String NO_UPLOAD = "\uC544\uC9C1 \uC5C5\uB85C\uB4DC\uB41C \uC0AC\uC9C4\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.";
         static final String UPLOAD_FOUND = "\uC0AC\uC9C4 \uC5C5\uB85C\uB4DC \uACB0\uACFC";
+        static final String SHOPPING_QR_CARD_TITLE = "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30";
+        static final String SHOPPING_QR_TITLE = "\uC1FC\uD551\uB9AC\uC2A4\uD2B8 QR";
+        static final String SHOPPING_QR_LOADING = "\uCD5C\uC2E0 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uB97C \uBD88\uB7EC\uC624\uACE0 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String SHOPPING_QR_GUIDE = "\uC774 QR\uC744 \uD734\uB300\uD3F0\uC73C\uB85C \uCD2C\uC601\uD55C \uB4A4 \uB9E4\uC7A5 Temi\uC5D0 \uBCF4\uC5EC\uC8FC\uC138\uC694.";
+        static final String SHOPPING_QR_EMPTY = "\uC1FC\uD551\uB9AC\uC2A4\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.";
+        static final String SHOPPING_QR_LOAD_FAILED = "\uC1FC\uD551\uB9AC\uC2A4\uD2B8\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
+        static final String SHOPPING_QR_CREATE_FAILED = "QR\uC744 \uB9CC\uB4E4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
     }
 }
