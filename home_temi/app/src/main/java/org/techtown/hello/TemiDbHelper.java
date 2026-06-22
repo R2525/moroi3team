@@ -11,7 +11,7 @@ import org.json.JSONObject;
 
 public class TemiDbHelper extends SQLiteOpenHelper {
     private static final String DB_NAME = "temi_local.db";
-    private static final int DB_VERSION = 3;
+    private static final int DB_VERSION = 4;
 
     public TemiDbHelper(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -62,6 +62,8 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 "item_name TEXT NOT NULL," +
                 "quantity INTEGER NOT NULL DEFAULT 1," +
                 "drawer_number INTEGER NOT NULL DEFAULT 0," +
+                "actual_drawer_number INTEGER NOT NULL DEFAULT 0," +
+                "sensor_event_at INTEGER NOT NULL DEFAULT 0," +
                 "status TEXT NOT NULL DEFAULT 'pending'," +
                 "updated_at INTEGER NOT NULL)");
         createShoppingTables(db);
@@ -69,6 +71,14 @@ public class TemiDbHelper extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 4) {
+            if (oldVersion >= 2) {
+                addPlacementColumnIfMissing(db, "actual_drawer_number", "INTEGER NOT NULL DEFAULT 0");
+                addPlacementColumnIfMissing(db, "sensor_event_at", "INTEGER NOT NULL DEFAULT 0");
+                createShoppingTables(db);
+                return;
+            }
+        }
         if (oldVersion >= 2 && oldVersion < 3) {
             createShoppingTables(db);
             return;
@@ -89,6 +99,20 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 "item_name TEXT NOT NULL," +
                 "quantity INTEGER NOT NULL DEFAULT 1," +
                 "created_at INTEGER NOT NULL)");
+    }
+
+    private void addPlacementColumnIfMissing(SQLiteDatabase db, String column, String definition) {
+        Cursor cursor = db.rawQuery("PRAGMA table_info(placement_items)", new String[]{});
+        try {
+            while (cursor.moveToNext()) {
+                if (column.equals(cursor.getString(cursor.getColumnIndexOrThrow("name")))) {
+                    return;
+                }
+            }
+        } finally {
+            cursor.close();
+        }
+        db.execSQL("ALTER TABLE placement_items ADD COLUMN " + column + " " + definition);
     }
 
     public synchronized JSONObject health() throws JSONException {
@@ -371,6 +395,8 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 item.put("item_name", ic.getString(ic.getColumnIndexOrThrow("item_name")));
                 item.put("quantity", ic.getInt(ic.getColumnIndexOrThrow("quantity")));
                 item.put("drawer_number", ic.getInt(ic.getColumnIndexOrThrow("drawer_number")));
+                item.put("actual_drawer_number", ic.getInt(ic.getColumnIndexOrThrow("actual_drawer_number")));
+                item.put("sensor_event_at", ic.getLong(ic.getColumnIndexOrThrow("sensor_event_at")));
                 item.put("status", ic.getString(ic.getColumnIndexOrThrow("status")));
                 items.put(item);
             }
@@ -383,12 +409,18 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         batch.put("current", idx >= 0 && idx < items.length() ? items.getJSONObject(idx) : JSONObject.NULL);
         batch.put("verify_ok", lastVerifyOk);
         batch.put("verify_message", lastVerifyMessage);
+        batch.put("mismatch_pending", mismatchPending);
+        batch.put("mismatch_expected_drawer", mismatchExpectedDrawer);
+        batch.put("mismatch_actual_drawer", mismatchActualDrawer);
         return batch;
     }
 
     // 마지막 검증 결과 (UI에 사유 표시용). 새 배치 시작 시 초기화.
     private boolean lastVerifyOk = true;
     private String lastVerifyMessage = "";
+    private boolean mismatchPending = false;
+    private int mismatchExpectedDrawer = 0;
+    private int mismatchActualDrawer = 0;
     private static final double WEIGHT_MIN_DELTA = 1.0; // 로드셀 무게 변화 최소값(이상이어야 통과)
 
     /**
@@ -396,7 +428,7 @@ public class TemiDbHelper extends SQLiteOpenHelper {
      * - 서랍 불일치 또는 무게 부족 → fail 처리("다시 넣어주세요" + 사유)
      * - 통과 → success 진행
      */
-    public synchronized JSONObject verifyAndAdvancePlacement(int reportedDrawer, Double weight) throws JSONException {
+    public synchronized JSONObject verifyAndAdvancePlacement(int reportedDrawer, Double weight, long sensorEventAt) throws JSONException {
         JSONObject batch = getActivePlacementBatch();
         if (batch == null) {
             return new JSONObject().put("active", false).put("message", "진행 중인 수납이 없습니다.");
@@ -404,12 +436,20 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         JSONObject current = batch.optJSONObject("current");
         int expectedDrawer = current == null ? 0 : current.optInt("drawer_number", 0);
         String expectedName = current == null ? "" : current.optString("item_name", "");
+        if (current != null) {
+            getWritableDatabase().execSQL(
+                    "UPDATE placement_items SET actual_drawer_number = ?, sensor_event_at = ? WHERE id = ?",
+                    new Object[]{reportedDrawer, sensorEventAt, current.optInt("id")});
+        }
 
         // 1) 서랍 번호 대조
         if (reportedDrawer > 0 && expectedDrawer > 0 && reportedDrawer != expectedDrawer) {
             lastVerifyOk = false;
             lastVerifyMessage = expectedName + "은 " + expectedDrawer + "번 서랍에 넣어야 합니다 ("
                     + reportedDrawer + "번에서 감지됨)";
+            mismatchPending = true;
+            mismatchExpectedDrawer = expectedDrawer;
+            mismatchActualDrawer = reportedDrawer;
             JSONObject fail = advancePlacement("fail");
             fail.put("verify", new JSONObject().put("ok", false).put("reason", lastVerifyMessage));
             return fail;
@@ -425,10 +465,15 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         // 통과
         lastVerifyOk = true;
         lastVerifyMessage = "";
+        mismatchPending = false;
+        mismatchExpectedDrawer = 0;
+        mismatchActualDrawer = 0;
         JSONObject ok = advancePlacement("success");
         ok.put("verify", new JSONObject()
                 .put("ok", true)
                 .put("drawer", expectedDrawer)
+                .put("actual_drawer", reportedDrawer)
+                .put("sensor_event_at", sensorEventAt)
                 .put("weight", weight == null ? JSONObject.NULL : weight));
         return ok;
     }
@@ -489,12 +534,44 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         getWritableDatabase().execSQL("UPDATE placement_batches SET status = 'cancelled' WHERE status = 'active'");
     }
 
+    public synchronized JSONObject resolveDrawerMismatch(boolean useActualDrawer) throws JSONException {
+        JSONObject batch = getActivePlacementBatch();
+        if (batch == null) {
+            return new JSONObject().put("active", false).put("message", "진행 중인 수납이 없습니다.");
+        }
+        if (!mismatchPending) {
+            return batch;
+        }
+        if (useActualDrawer) {
+            JSONObject current = batch.optJSONObject("current");
+            if (current != null) {
+            getWritableDatabase().execSQL("UPDATE placement_items SET drawer_number = ?, actual_drawer_number = ? WHERE id = ?",
+                    new Object[]{mismatchActualDrawer, mismatchActualDrawer, current.optInt("id")});
+            }
+            lastVerifyOk = true;
+            lastVerifyMessage = "";
+            mismatchPending = false;
+            mismatchExpectedDrawer = 0;
+            mismatchActualDrawer = 0;
+            return advancePlacement("success");
+        }
+
+        lastVerifyOk = false;
+        lastVerifyMessage = mismatchExpectedDrawer + "번 서랍에 다시 넣어주세요.";
+        mismatchPending = false;
+        mismatchExpectedDrawer = 0;
+        mismatchActualDrawer = 0;
+        JSONObject retry = getActivePlacementBatch();
+        retry.put("last_result", "fail");
+        return retry;
+    }
+
     // 마지막 단계: placement_items를 순서(seq)대로 읽어 시간(updated_at) 순서를 검증하고,
     // placed 상태인 물품만 실제 Temi DB(items 테이블)에 일괄 저장한다.
     private JSONObject commitPlacementBatch(int batchId) throws JSONException {
         SQLiteDatabase db = getWritableDatabase();
         Cursor c = db.rawQuery(
-                "SELECT item_name, drawer_number, quantity, status, updated_at "
+                "SELECT item_name, drawer_number, actual_drawer_number, sensor_event_at, quantity, status, updated_at "
                         + "FROM placement_items WHERE batch_id = ? ORDER BY seq",
                 new String[]{String.valueOf(batchId)});
         int committed = 0;
@@ -507,18 +584,21 @@ public class TemiDbHelper extends SQLiteOpenHelper {
                 if (!"placed".equals(status)) {
                     continue; // 건너뛴(skipped) 물품은 저장하지 않음
                 }
-                long ts = c.getLong(c.getColumnIndexOrThrow("updated_at"));
+                long eventTs = c.getLong(c.getColumnIndexOrThrow("sensor_event_at"));
+                long ts = eventTs > 0 ? eventTs : c.getLong(c.getColumnIndexOrThrow("updated_at"));
                 if (ts < prevTs) {
                     timeOrderOk = false; // 넣은 시각이 순서를 거스르면 경고
                 }
                 prevTs = ts;
                 String name = c.getString(c.getColumnIndexOrThrow("item_name"));
                 int drawer = c.getInt(c.getColumnIndexOrThrow("drawer_number"));
+                int actualDrawer = c.getInt(c.getColumnIndexOrThrow("actual_drawer_number"));
                 int qty = c.getInt(c.getColumnIndexOrThrow("quantity"));
                 savePlacement(name, drawer, qty, "placement");
                 saved.put(new JSONObject()
                         .put("item_name", name)
                         .put("drawer_number", drawer)
+                        .put("actual_drawer_number", actualDrawer)
                         .put("quantity", qty)
                         .put("placed_at", ts));
                 committed++;

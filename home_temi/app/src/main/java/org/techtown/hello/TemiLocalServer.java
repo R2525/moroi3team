@@ -23,10 +23,13 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.text.SimpleDateFormat;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -190,28 +193,53 @@ public class TemiLocalServer {
                     // Uno Q: 카메라/로드셀 적재 완료 → 현재 물품(순서)을 placed로 진행.
                     // 시간 비교: 직전 진행과 너무 가까우면 중복으로 보고 무시한다.
                     long nowTs = System.currentTimeMillis();
-                    if (nowTs - lastPlacementAdvanceTs < PLACEMENT_DEBOUNCE_MS) {
+                    JSONObject activeBatch = db.getActivePlacementBatch();
+                    if (activeBatch != null && activeBatch.optBoolean("mismatch_pending", false)) {
+                        writeJson(socket, 200, activeBatch
+                                .put("ignored", true)
+                                .put("message", "\uC11C\uB78D \uBD88\uC77C\uCE58 \uD655\uC778 \uB300\uAE30 \uC911"));
+                    } else if (nowTs - lastPlacementAdvanceTs < PLACEMENT_DEBOUNCE_MS) {
                         writeJson(socket, 200, new JSONObject()
                                 .put("ignored", true)
                                 .put("message", "중복 로그 무시 (시간 비교)"));
                     } else {
                         lastPlacementAdvanceTs = nowTs;
                         // 검증 단계: 보고된 서랍번호/무게를 기대값과 대조 후 진행/실패 판정
-                        int reportedDrawer = body.optInt("drawer_number", 0);
+                        int reportedDrawer = inferDrawerFromSensorData(body);
                         Double weight = null;
                         if (body.has("value")) {
                             weight = body.optDouble("value");
                         } else if (body.has("weight_delta")) {
                             weight = body.optDouble("weight_delta");
                         }
-                        writeJson(socket, 200, db.verifyAndAdvancePlacement(reportedDrawer, weight));
+                        long eventAt = parseEventTimestampMs(body, nowTs);
+                        writeJson(socket, 200, db.verifyAndAdvancePlacement(reportedDrawer, weight, eventAt));
                     }
                 } else if (isFail) {
                     writeJson(socket, 200, db.advancePlacement("fail"));
                 } else {
                     // weight_changed 등 그 외 센서값은 기록만 한다.
                     Double value = body.has("value") ? body.optDouble("value") : null;
-                    writeJson(socket, 201, db.recordSensorEvent(body.optInt("drawer_number"), type, value));
+                    int reportedDrawer = inferDrawerFromSensorData(body);
+                    JSONObject activeBatch = db.getActivePlacementBatch();
+                    if (activeBatch != null && activeBatch.optBoolean("mismatch_pending", false)) {
+                        writeJson(socket, 200, activeBatch
+                                .put("ignored", true)
+                                .put("message", "\uC11C\uB78D \uBD88\uC77C\uCE58 \uD655\uC778 \uB300\uAE30 \uC911"));
+                    } else if (activeBatch != null && reportedDrawer > 0) {
+                        long nowTs = System.currentTimeMillis();
+                        if (nowTs - lastPlacementAdvanceTs < PLACEMENT_DEBOUNCE_MS) {
+                            writeJson(socket, 200, new JSONObject()
+                                    .put("ignored", true)
+                                    .put("message", "\uC911\uBCF5 \uB85C\uADF8 \uBB34\uC2DC (\uC2DC\uAC04 \uBE44\uAD50)"));
+                        } else {
+                            lastPlacementAdvanceTs = nowTs;
+                            long eventAt = parseEventTimestampMs(body, nowTs);
+                            writeJson(socket, 200, db.verifyAndAdvancePlacement(reportedDrawer, value, eventAt));
+                        }
+                    } else {
+                        writeJson(socket, 201, db.recordSensorEvent(body.optInt("drawer_number"), type, value));
+                    }
                 }
             } else if ("POST".equals(request.method) && "/api/placement-batches".equals(path)) {
                 JSONObject body = new JSONObject(request.bodyAsString());
@@ -417,6 +445,52 @@ public class TemiLocalServer {
                 "<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">" +
                 "<input type=\"file\" name=\"image\" accept=\"image/*\" required>" +
                 "<button type=\"submit\">업로드</button></form></body></html>";
+    }
+
+    private long parseEventTimestampMs(JSONObject body, long fallback) {
+        String timestamp = body.optString("timestamp", "").trim();
+        if (timestamp.length() == 0) {
+            return fallback;
+        }
+        try {
+            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+            format.setTimeZone(TimeZone.getTimeZone("UTC"));
+            return format.parse(timestamp).getTime();
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private int inferDrawerFromSensorData(JSONObject body) {
+        int fromDelta = maxPositiveDeltaIndex(body.optJSONArray("weight_effective_deltas"));
+        if (fromDelta > 0) {
+            return fromDelta;
+        }
+        fromDelta = maxPositiveDeltaIndex(body.optJSONArray("weight_raw_deltas"));
+        if (fromDelta > 0) {
+            return fromDelta;
+        }
+        int selected = body.optInt("selected_sensor_index", 0);
+        if (selected > 0) {
+            return selected;
+        }
+        return body.optInt("drawer_number", 0);
+    }
+
+    private int maxPositiveDeltaIndex(JSONArray values) {
+        if (values == null || values.length() == 0) {
+            return 0;
+        }
+        double best = 0;
+        int bestIndex = 0;
+        for (int i = 0; i < values.length(); i++) {
+            double value = values.optDouble(i, 0);
+            if (value > best) {
+                best = value;
+                bestIndex = i + 1;
+            }
+        }
+        return bestIndex;
     }
 
     private String resultPage(JSONObject response) {

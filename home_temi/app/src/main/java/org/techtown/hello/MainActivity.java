@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -28,6 +29,9 @@ import com.google.zxing.BarcodeFormat;
 import com.google.zxing.EncodeHintType;
 import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.common.BitMatrix;
+import com.robotemi.sdk.Robot;
+import com.robotemi.sdk.listeners.OnConversationStatusChangedListener;
+import com.robotemi.sdk.listeners.OnRobotReadyListener;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -45,6 +49,7 @@ import java.util.List;
 import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "HomeTemi";
     private static final String PAGE_HOME = "HOME";
     private static final String PAGE_FIND = "FIND";
     private static final String PAGE_RESULT = "RESULT";
@@ -62,6 +67,11 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREF_API_KEY = "gemini_api_key";
     private static final String PREF_PUBLIC_IP = "public_ip_override";
     private static final String PREF_SHOPPING_API_BASE_URL = "shopping_api_base_url";
+    private static final String PREF_DEFAULT_SETTINGS_VERSION = "default_settings_version";
+    private static final int CURRENT_DEFAULT_SETTINGS_VERSION = 3;
+    private static final String DEFAULT_GEMINI_API_KEY = "";
+    private static final String DEFAULT_PUBLIC_IP = "10.34.255.116";
+    private static final String DEFAULT_SHOPPING_API_BASE_URL = "http://10.34.255.29:8000";
     private static final String DEFAULT_EMULATOR_SHOPPING_API_BASE_URL = "http://10.0.2.2:8080";
 
     private FrameLayout pageRoot;
@@ -81,6 +91,27 @@ public class MainActivity extends AppCompatActivity {
     private Runnable logPoller;
     private LinearLayout logContainer;
     private int placementShownIndex = -1;
+    private Robot robot;
+    private boolean robotReady = false;
+    private boolean waitingForVoiceSearch = false;
+
+    private final Robot.AsrListener asrListener = result -> runOnUiThread(() -> handleVoiceSearchResult(result));
+
+    private final OnConversationStatusChangedListener conversationStatusChangedListener = (status, text) -> {
+        if (status == OnConversationStatusChangedListener.IDLE && waitingForVoiceSearch) {
+            runOnUiThread(() -> toast("음성을 듣지 못했습니다. 다시 시도하세요."));
+            waitingForVoiceSearch = false;
+        }
+    };
+
+    private final OnRobotReadyListener robotReadyListener = isReady -> {
+        robotReady = isReady;
+        Log.d(TAG, "Temi robot ready=" + isReady);
+        if (isReady && robot != null) {
+            robot.addAsrListener(asrListener);
+            robot.addOnConversationStatusChangedListener(conversationStatusChangedListener);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,6 +127,9 @@ public class MainActivity extends AppCompatActivity {
         pageRoot = new FrameLayout(this);
         pageRoot.setBackgroundColor(Color.parseColor("#F5F7FA"));
         setContentView(pageRoot);
+
+        applyDefaultSettingsIfMissing();
+        initTemiVoice();
 
         localDb = new TemiDbHelper(this);
         localServer = new TemiLocalServer(this, localDb);
@@ -116,6 +150,11 @@ public class MainActivity extends AppCompatActivity {
         stopHomeBatchWatch();
         if (localServer != null) {
             localServer.stop();
+        }
+        if (robot != null) {
+            robot.removeAsrListener(asrListener);
+            robot.removeOnConversationStatusChangedListener(conversationStatusChangedListener);
+            robot.removeOnRobotReadyListener(robotReadyListener);
         }
         if (localDb != null) {
             localDb.close();
@@ -163,8 +202,8 @@ public class MainActivity extends AppCompatActivity {
             addNavGridCard(row3, K.DB_STATUS_CARD_TITLE, "\uC11C\uBC84\uC640 DB \uC5F0\uACB0 \uC0C1\uD0DC\uB97C \uD655\uC778\uD569\uB2C8\uB2E4.", v -> checkDbStatus());
 
             LinearLayout row4 = homeGridRow(page);
+            addNavGridCard(row4, "\uC804\uCCB4 DB \uC870\uD68C", "\uC218\uB0A9\uB41C \uBB3C\uAC74 \uC804\uCCB4\uB97C \uC11C\uB78D\uBCC4\uB85C \uD655\uC778\uD569\uB2C8\uB2E4.", v -> showAllItemsPage());
             addNavGridCard(row4, "\uC124\uC815", "API \uD0A4\uC640 \uC811\uC18D IP\uB97C \uC124\uC815\uD569\uB2C8\uB2E4.", v -> showSettings());
-            addGridSpacer(row4);
 
             setPage(page);
             startHomeBatchWatch();
@@ -177,6 +216,7 @@ public class MainActivity extends AppCompatActivity {
         addNavCard(page, "\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30", "\uC0B4 \uBB3C\uAC74\uACFC \uC218\uB7C9\uC744 home_temi \uC548\uC5D0\uC11C \uC9C1\uC811 \uB9CC\uB4ED\uB2C8\uB2E4.", v -> showShoppingListPage());
         addNavCard(page, "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", "home_temi\uC5D0\uC11C \uB9CC\uB4E0 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uB85C QR\uC744 \uC0DD\uC131\uD569\uB2C8\uB2E4.", v -> showShoppingQrPage());
         addNavCard(page, K.DB_STATUS_CARD_TITLE, "Temi가 서버·DB에 연결됐는지 확인합니다.", v -> checkDbStatus());
+        addNavCard(page, "\uC804\uCCB4 DB \uC870\uD68C", "\uC218\uB0A9\uB41C \uBB3C\uAC74 \uC804\uCCB4\uB97C \uD655\uC778\uD569\uB2C8\uB2E4.", v -> showAllItemsPage());
         addNavCard(page, "설정", "API 키·외부 접속 IP 등을 설정합니다.", v -> showSettings());
         setPage(page);
         startHomeBatchWatch();
@@ -191,7 +231,7 @@ public class MainActivity extends AppCompatActivity {
         page.addView(searchInput, matchHeight(72, 6, 18));
 
         LinearLayout row = horizontal(page);
-        addButton(row, K.VOICE_BUTTON, false, v -> toast(K.VOICE_TODO));
+        addButton(row, K.VOICE_BUTTON, false, v -> startVoiceSearchWithTemiSdk());
         addButton(row, K.SEARCH_BUTTON, true, v -> {
             String keyword = searchInput.getText().toString().trim();
             if (keyword.isEmpty()) {
@@ -202,6 +242,114 @@ public class MainActivity extends AppCompatActivity {
         });
 
         setPage(page);
+    }
+
+    private void initTemiVoice() {
+        try {
+            robot = Robot.Companion.getInstance();
+            robot.addOnRobotReadyListener(robotReadyListener);
+            if (isRobotReadyNow()) {
+                robotReady = true;
+                robot.addAsrListener(asrListener);
+                robot.addOnConversationStatusChangedListener(conversationStatusChangedListener);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Temi voice init failed", t);
+            robot = null;
+            robotReady = false;
+        }
+    }
+
+    private boolean isRobotReadyNow() {
+        try {
+            return robot != null && robot.isReady();
+        } catch (Throwable t) {
+            Log.w(TAG, "Temi ready check failed", t);
+            return false;
+        }
+    }
+
+    private void startVoiceSearchWithTemiSdk() {
+        if (searchInput == null) {
+            return;
+        }
+        if (robot == null) {
+            initTemiVoice();
+        }
+        robotReady = isRobotReadyNow();
+        if (robot == null) {
+            toast("Temi \uC74C\uC131 \uC778\uC2DD\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+            return;
+        }
+        waitingForVoiceSearch = true;
+        searchInput.setText("");
+        toast("\uCC3E\uC744 \uBB3C\uAC74 \uC774\uB984\uC744 \uB9D0\uD558\uC138\uC694.");
+        try {
+            robot.addAsrListener(asrListener);
+            robot.addOnConversationStatusChangedListener(conversationStatusChangedListener);
+            robot.askQuestion("\uCC3E\uC744 \uBB3C\uAC74 \uC774\uB984\uC744 \uB9D0\uD574\uC8FC\uC138\uC694.");
+        } catch (Throwable t) {
+            Log.w(TAG, "Temi voice search failed; ready=" + robotReady, t);
+            waitingForVoiceSearch = false;
+            toast("\uC74C\uC131 \uC778\uC2DD\uC744 \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+        }
+    }
+
+    private void startVoiceSearch() {
+        if (searchInput == null) {
+            return;
+        }
+        if (robot == null) {
+            initTemiVoice();
+        }
+        robotReady = isRobotReadyNow();
+        if (robot == null) {
+            toast("Temi 음성 인식이 아직 준비되지 않았습니다.");
+            return;
+        }
+        waitingForVoiceSearch = true;
+        searchInput.setText("");
+        toast("찾을 물건 이름을 말하세요.");
+        try {
+            robot.askQuestion("찾을 물건 이름을 말해주세요.");
+        } catch (Throwable t) {
+            waitingForVoiceSearch = false;
+            toast("음성 인식을 시작하지 못했습니다.");
+        }
+    }
+
+    private void handleVoiceSearchResult(String result) {
+        if (!waitingForVoiceSearch) {
+            return;
+        }
+        waitingForVoiceSearch = false;
+        String keyword = normalizeVoiceKeyword(result);
+        if (keyword.length() == 0) {
+            toast("인식된 물건 이름이 없습니다.");
+            return;
+        }
+        if (searchInput != null) {
+            searchInput.setText(keyword);
+            searchInput.setSelection(keyword.length());
+        }
+        searchItem(keyword);
+    }
+
+    private String normalizeVoiceKeyword(String value) {
+        if (value == null) {
+            return "";
+        }
+        String keyword = value.trim();
+        String[] suffixes = new String[]{
+                "찾아줘", "찾아 줘", "어디 있어", "어디있어", "어디야",
+                "찾아", "검색해줘", "검색해 줘", "검색"
+        };
+        for (String suffix : suffixes) {
+            if (keyword.endsWith(suffix)) {
+                keyword = keyword.substring(0, keyword.length() - suffix.length()).trim();
+            }
+        }
+        return keyword;
     }
 
     private void showRegisterPage() {
@@ -313,6 +461,42 @@ public class MainActivity extends AppCompatActivity {
         setPage(page);
     }
 
+    private void showAllItemsPage() {
+        currentPage = PAGE_DB_STATUS;
+        LinearLayout page = basePage("\uC804\uCCB4 DB \uC870\uD68C", true);
+        LinearLayout resultCard = card(page);
+        try {
+            JSONArray items = localDb.listItems();
+            resultCard.addView(text("\uC218\uB0A9 \uBB3C\uD488 " + items.length() + "\uAC1C", 32, "#17202A", true));
+            if (items.length() == 0) {
+                resultCard.addView(text("\uC544\uC9C1 DB\uC5D0 \uC800\uC7A5\uB41C \uBB3C\uAC74\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", 26, "#657184", false));
+            } else {
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject item = items.optJSONObject(i);
+                    if (item == null) {
+                        continue;
+                    }
+                    LinearLayout row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.VERTICAL);
+                    row.setPadding(0, dp(14), 0, dp(14));
+                    row.addView(text(item.optString("name", "(이름 없음)"), 28, "#17202A", true));
+                    String meta = item.optInt("drawer_number", 0) + "\uBC88 \uC11C\uB78D  ·  "
+                            + item.optInt("quantity", 1) + "\uAC1C  ·  "
+                            + item.optString("source", "");
+                    row.addView(text(meta, 22, "#657184", false));
+                    resultCard.addView(row);
+                }
+            }
+        } catch (Exception e) {
+            resultCard.addView(text(e.getMessage(), 24, "#B42318", true));
+        }
+
+        LinearLayout row = horizontal(page);
+        addButton(row, "\uC0C8\uB85C\uACE0\uCE68", false, v -> showAllItemsPage());
+        addButton(row, K.HOME_BUTTON, true, v -> showHome());
+        setPage(page);
+    }
+
     private void checkDbStatus() {
         currentPage = PAGE_DB_STATUS;
         showSimpleLoading(K.DB_STATUS_TITLE, K.DB_CHECKING_MESSAGE);
@@ -405,6 +589,37 @@ public class MainActivity extends AppCompatActivity {
         });
         addButton(row, "\uC1FC\uD551 QR \uB9CC\uB4E4\uAE30", true, v -> showShoppingQrPage());
         setPage(page);
+    }
+
+    private void applyDefaultSettingsIfMissing() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (prefs.getInt(PREF_DEFAULT_SETTINGS_VERSION, 0) < CURRENT_DEFAULT_SETTINGS_VERSION) {
+            prefs.edit()
+                    .putString(PREF_API_KEY, DEFAULT_GEMINI_API_KEY)
+                    .putString(PREF_PUBLIC_IP, DEFAULT_PUBLIC_IP)
+                    .putString(PREF_SHOPPING_API_BASE_URL, DEFAULT_SHOPPING_API_BASE_URL)
+                    .putInt(PREF_DEFAULT_SETTINGS_VERSION, CURRENT_DEFAULT_SETTINGS_VERSION)
+                    .apply();
+            return;
+        }
+
+        SharedPreferences.Editor editor = prefs.edit();
+        boolean changed = false;
+        if (prefs.getString(PREF_API_KEY, "").trim().length() == 0) {
+            editor.putString(PREF_API_KEY, DEFAULT_GEMINI_API_KEY);
+            changed = true;
+        }
+        if (prefs.getString(PREF_PUBLIC_IP, "").trim().length() == 0) {
+            editor.putString(PREF_PUBLIC_IP, DEFAULT_PUBLIC_IP);
+            changed = true;
+        }
+        if (prefs.getString(PREF_SHOPPING_API_BASE_URL, "").trim().length() == 0) {
+            editor.putString(PREF_SHOPPING_API_BASE_URL, DEFAULT_SHOPPING_API_BASE_URL);
+            changed = true;
+        }
+        if (changed) {
+            editor.apply();
+        }
     }
 
     private void addShoppingListItem(EditText itemNameInput, EditText quantityInput) {
@@ -511,11 +726,11 @@ public class MainActivity extends AppCompatActivity {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
         localServerUrl = localServer.getBaseUrl();
-        String uploadUrl = publicIp.isEmpty() ? localServerUrl + "/upload-qr" : "http://" + publicIp + ":" + TemiLocalServer.PORT + "/upload-qr";
+        String uploadUrl = publicIp.isEmpty() ? localServerUrl + "/upload" : "http://" + publicIp + ":" + TemiLocalServer.PORT + "/upload";
 
         LinearLayout page = basePage(K.UPLOAD_TITLE, true);
         LinearLayout resultCard = card(page);
-        TextView headline = text("\uC774 QR\uC744 \uC2A4\uCE94\uD558\uBA74 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C QR \uC774\uBBF8\uC9C0\uB97C \uB2E4\uC6B4\uB85C\uB4DC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.", 32, "#17202A", true);
+        TextView headline = text("\uC774 QR\uC744 \uC2A4\uCE94\uD558\uBA74 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C \uC0AC\uC9C4\uCCA9 \uC0AC\uC9C4\uC744 \uC62C\uB824 Gemini\uB85C \uBD84\uC11D\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.", 32, "#17202A", true);
         resultCard.addView(headline);
         addInfoRow(resultCard, K.ADDRESS_LABEL, uploadUrl);
 
@@ -685,9 +900,21 @@ public class MainActivity extends AppCompatActivity {
         addInfoRow(cur, "진행률", placedCount + " / " + total + " 완료");
         boolean verifyOk = batch.optBoolean("verify_ok", true);
         String verifyMsg = batch.optString("verify_message", "");
-        if (!verifyOk || "fail".equals(batch.optString("last_result"))) {
+        boolean mismatchPending = batch.optBoolean("mismatch_pending", false);
+        if (mismatchPending) {
+            stopPlacementPolling();
+        }
+        if (mismatchPending) {
+            int expected = batch.optInt("mismatch_expected_drawer", 0);
+            int actual = batch.optInt("mismatch_actual_drawer", 0);
+            cur.addView(text("서랍 위치 확인 필요", 28, "#B42318", true));
+            cur.addView(text("Gemini 추천은 " + expected + "번, 실제 감지는 " + actual + "번입니다.", 24, "#B42318", true));
+            LinearLayout confirmRow = horizontal(cur);
+            addButton(confirmRow, expected + "번에 다시 넣기", false, v -> resolveDrawerMismatch(false));
+            addButton(confirmRow, actual + "번으로 저장", true, v -> resolveDrawerMismatch(true));
+        } else if (!verifyOk || "fail".equals(batch.optString("last_result"))) {
             String reason = verifyMsg.length() > 0 ? verifyMsg : "검증 실패";
-            cur.addView(text("⚠ " + reason + " — 다시 넣어주세요.", 24, "#B42318", true));
+            cur.addView(text(reason + " - 다시 넣어주세요.", 24, "#B42318", true));
         } else {
             cur.addView(text("넣은 뒤 서랍·무게를 자동 검증합니다. 센서 확인 대기 중...", 22, "#657184", false));
         }
@@ -733,6 +960,19 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void resolveDrawerMismatch(boolean useActualDrawer) {
+        try {
+            JSONObject r = localDb.resolveDrawerMismatch(useActualDrawer);
+            if (r.optBoolean("completed", false)) {
+                showPlacementComplete();
+            } else {
+                renderPlacement(r);
+            }
+        } catch (Exception e) {
+            toast(e.getMessage());
+        }
+    }
+
     private void startPlacementPolling() {
         stopPlacementPolling();
         placementPoller = new Runnable() {
@@ -747,7 +987,9 @@ public class MainActivity extends AppCompatActivity {
                         showPlacementComplete();
                         return;
                     }
-                    if (batch.optInt("current_index", -1) != placementShownIndex) {
+                    if (batch.optInt("current_index", -1) != placementShownIndex
+                            || batch.optBoolean("mismatch_pending", false)
+                            || !batch.optBoolean("verify_ok", true)) {
                         renderPlacement(batch);
                     }
                 } catch (Exception ignored) {
@@ -1002,6 +1244,7 @@ public class MainActivity extends AppCompatActivity {
         int itemCount = items == null ? 0 : items.length();
         if (itemCount == 0) {
             resultCard.addView(text("\uC804\uB2EC\uD560 \uC1FC\uD551\uB9AC\uC2A4\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.", 32, "#17202A", true));
+            resultCard.addView(text("\uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30\uC5D0\uC11C \uBB3C\uD488\uC744 \uCD94\uAC00\uD55C \uB4A4 QR\uC744 \uC0DD\uC131\uD558\uC138\uC694.", 24, "#657184", false));
         } else {
             String shareId = localServer.createShoppingQrShare(payload);
             String pageUrl = shoppingQrShareBaseUrl() + "/shopping-qr?id=" + shareId;
@@ -1021,8 +1264,13 @@ public class MainActivity extends AppCompatActivity {
         }
 
         LinearLayout row = horizontal(page);
-        addButton(row, "\uC0C8\uB85C \uC0DD\uC131", true, v -> showShoppingQrPage());
-        addButton(row, K.HOME_BUTTON, false, v -> showHome());
+        if (itemCount == 0) {
+            addButton(row, "\uC1FC\uD551\uB9AC\uC2A4\uD2B8", true, v -> showShoppingListPage());
+            addButton(row, K.HOME_BUTTON, false, v -> showHome());
+        } else {
+            addButton(row, "\uC0C8\uB85C \uC0DD\uC131", true, v -> showShoppingQrPage());
+            addButton(row, K.HOME_BUTTON, false, v -> showHome());
+        }
         setPage(page);
     }
 
@@ -1035,9 +1283,6 @@ public class MainActivity extends AppCompatActivity {
 
     private JSONObject fetchShoppingQrPayload() throws Exception {
         JSONArray sourceItems = localDb.listShoppingItems();
-        if (sourceItems.length() == 0) {
-            throw new Exception("\uBA3C\uC800 \uC1FC\uD551\uB9AC\uC2A4\uD2B8 \uB9CC\uB4E4\uAE30\uC5D0\uC11C \uBB3C\uD488\uC744 \uCD94\uAC00\uD558\uC138\uC694.");
-        }
         return buildShoppingQrPayload(sourceItems);
     }
 
@@ -1225,7 +1470,7 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout basePage(String title, boolean showBack) {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(32), dp(24), dp(32), dp(24));
+        content.setPadding(dp(32), dp(48), dp(32), dp(24));
 
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);

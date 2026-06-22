@@ -1,20 +1,3 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Debug-only overlay.
-  Temi SDK의 TemiSdkContentProvider는 Temi OS가 아닌 환경(일반 에뮬레이터/폰)에서
-  프로세스를 종료시킨다. debug 빌드에서만 이 provider를 제거해 에뮬레이터에서 UI/웹/
-  카메라 등 로봇 무관 기능을 테스트할 수 있게 한다.
-  release 빌드(실제 Temi 배포용)에는 영향이 없으며 SDK가 그대로 동작한다.
--->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="org.techtown.hello">
-
-    <application>
-        <provider
-            android:name="com.robotemi.sdk.TemiSdkContentProvider"
-            android:authorities="${applicationId}.com.robotemi.sdk"
-            tools:node="remove" />
-    </application>
-
-</manifest>
+    package="org.techtown.hello" />
