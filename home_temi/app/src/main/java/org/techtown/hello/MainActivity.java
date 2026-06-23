@@ -68,7 +68,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREF_PUBLIC_IP = "public_ip_override";
     private static final String PREF_SHOPPING_API_BASE_URL = "shopping_api_base_url";
     private static final String PREF_DEFAULT_SETTINGS_VERSION = "default_settings_version";
-    private static final int CURRENT_DEFAULT_SETTINGS_VERSION = 3;
+    private static final int CURRENT_DEFAULT_SETTINGS_VERSION = 7;
     private static final String DEFAULT_GEMINI_API_KEY = "";
     private static final String DEFAULT_PUBLIC_IP = "10.34.255.116";
     private static final String DEFAULT_SHOPPING_API_BASE_URL = "http://10.34.255.29:8000";
@@ -91,6 +91,7 @@ public class MainActivity extends AppCompatActivity {
     private Runnable logPoller;
     private LinearLayout logContainer;
     private int placementShownIndex = -1;
+    private int uploadWatchBaselineId = -1;
     private Robot robot;
     private boolean robotReady = false;
     private boolean waitingForVoiceSearch = false;
@@ -723,6 +724,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showUploadPage() {
         currentPage = PAGE_UPLOAD;
+        uploadWatchBaselineId = latestUploadId();
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         String publicIp = prefs.getString(PREF_PUBLIC_IP, "").trim();
         localServerUrl = localServer.getBaseUrl();
@@ -751,6 +753,7 @@ public class MainActivity extends AppCompatActivity {
         addButton(row, K.LATEST_UPLOAD_BUTTON, false, v -> showLatestUpload());
         addButton(row, K.HOME_BUTTON, false, v -> showHome());
         setPage(page);
+        startHomeBatchWatch();
     }
 
     // --- 수납 워크플로우: 확인 단계 → 넣기 단계 → 완료 ---
@@ -954,6 +957,7 @@ public class MainActivity extends AppCompatActivity {
                 showPlacementComplete();
             } else {
                 renderPlacement(r);
+                startPlacementPolling();
             }
         } catch (Exception e) {
             toast(e.getMessage());
@@ -967,6 +971,7 @@ public class MainActivity extends AppCompatActivity {
                 showPlacementComplete();
             } else {
                 renderPlacement(r);
+                startPlacementPolling();
             }
         } catch (Exception e) {
             toast(e.getMessage());
@@ -987,11 +992,12 @@ public class MainActivity extends AppCompatActivity {
                         showPlacementComplete();
                         return;
                     }
-                    if (batch.optInt("current_index", -1) != placementShownIndex
-                            || batch.optBoolean("mismatch_pending", false)
-                            || !batch.optBoolean("verify_ok", true)) {
-                        renderPlacement(batch);
+                    boolean mismatchPending = batch.optBoolean("mismatch_pending", false);
+                    renderPlacement(batch);
+                    if (!mismatchPending) {
+                        placementHandler.postDelayed(this, 1500);
                     }
+                    return;
                 } catch (Exception ignored) {
                 }
                 placementHandler.postDelayed(this, 1500);
@@ -1013,7 +1019,7 @@ public class MainActivity extends AppCompatActivity {
         homeBatchWatcher = new Runnable() {
             @Override
             public void run() {
-                if (!PAGE_HOME.equals(currentPage)) {
+                if (!PAGE_HOME.equals(currentPage) && !PAGE_UPLOAD.equals(currentPage)) {
                     return;
                 }
                 try {
@@ -1023,12 +1029,41 @@ public class MainActivity extends AppCompatActivity {
                         showPlacementStep();
                         return;
                     }
+                    if (PAGE_UPLOAD.equals(currentPage) && hasNewAnalyzedUpload()) {
+                        stopHomeBatchWatch();
+                        startConfirmFromLatest();
+                        return;
+                    }
                 } catch (Exception ignored) {
                 }
                 placementHandler.postDelayed(this, 2000);
             }
         };
         placementHandler.postDelayed(homeBatchWatcher, 2000);
+    }
+
+    private int latestUploadId() {
+        try {
+            return localDb.latestPhotoUpload().optInt("id", -1);
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private boolean hasNewAnalyzedUpload() {
+        try {
+            JSONObject latest = localDb.latestPhotoUpload();
+            if (!latest.optBoolean("found", false) || latest.optInt("id", -1) <= uploadWatchBaselineId) {
+                return false;
+            }
+            JSONObject result = latest.optJSONObject("result");
+            JSONArray summary = result == null ? null : result.optJSONArray("summary");
+            return "analyzed".equals(latest.optString("status"))
+                    && summary != null
+                    && summary.length() > 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void stopHomeBatchWatch() {
@@ -1104,11 +1139,24 @@ public class MainActivity extends AppCompatActivity {
             showSettings();
         });
         addButton(page, "실시간 센서 로그 보기", false, v -> showSensorLog());
+        addButton(page, "\uC804\uCCB4 DB \uCD08\uAE30\uD654", false, v -> resetAllLocalData());
         addButton(page, K.HOME_BUTTON, false, v -> showHome());
         setPage(page);
     }
 
     // Uno Q가 8088로 보내는 sensor-event를 실시간으로 보여주는 화면
+    private void resetAllLocalData() {
+        try {
+            stopPlacementPolling();
+            stopHomeBatchWatch();
+            localDb.clearAllData();
+            toast("\uC804\uCCB4 DB\uB97C \uCD08\uAE30\uD654\uD588\uC2B5\uB2C8\uB2E4.");
+            showSettings();
+        } catch (Exception e) {
+            showSimpleError("\uC804\uCCB4 DB \uCD08\uAE30\uD654 \uC2E4\uD328", e.getMessage());
+        }
+    }
+
     private void showSensorLog() {
         currentPage = PAGE_LOG;
         LinearLayout page = basePage("실시간 센서 로그", true);
@@ -1201,6 +1249,7 @@ public class MainActivity extends AppCompatActivity {
             JSONObject latest = localDb.latestPhotoUpload();
             LinearLayout page = basePage(K.LATEST_UPLOAD_TITLE, true);
             LinearLayout resultCard = card(page);
+            boolean canEditLatest = latest.optBoolean("found", false);
             if (!latest.optBoolean("found", false)) {
                 resultCard.addView(text(K.NO_UPLOAD, 32, "#17202A", true));
             } else {
@@ -1214,7 +1263,14 @@ public class MainActivity extends AppCompatActivity {
             }
             LinearLayout row = horizontal(page);
             addButton(row, K.UPLOAD_TITLE, false, v -> showUploadPage());
-            addButton(row, K.HOME_BUTTON, true, v -> showHome());
+            if (canEditLatest) {
+                addButton(row, "\uACB0\uACFC \uC218\uC815", true, v -> startConfirmFromLatest());
+            } else {
+                addButton(row, K.HOME_BUTTON, true, v -> showHome());
+            }
+            if (canEditLatest) {
+                addButton(page, K.HOME_BUTTON, false, v -> showHome());
+            }
             setPage(page);
         } catch (Exception e) {
             showSimpleError(K.LATEST_UPLOAD_TITLE, e.getMessage());

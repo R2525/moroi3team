@@ -220,6 +220,23 @@ public class TemiDbHelper extends SQLiteOpenHelper {
         db.delete("shopping_items", null, null);
     }
 
+    public synchronized void clearAllData() {
+        SQLiteDatabase db = getWritableDatabase();
+        db.delete("placement_items", null, null);
+        db.delete("placement_batches", null, null);
+        db.delete("shopping_items", null, null);
+        db.delete("photo_uploads", null, null);
+        db.delete("drawer_events", null, null);
+        db.delete("storage_sessions", null, null);
+        db.delete("items", null, null);
+        lastVerifyOk = true;
+        lastVerifyMessage = "";
+        mismatchPending = false;
+        lastVerifyMessage = "";
+        mismatchExpectedDrawer = 0;
+        mismatchActualDrawer = 0;
+    }
+
     public synchronized JSONObject startStorageSession(String itemName, int drawerNumber, int quantity) throws JSONException {
         long now = System.currentTimeMillis();
         SQLiteDatabase db = getWritableDatabase();
@@ -556,13 +573,20 @@ public class TemiDbHelper extends SQLiteOpenHelper {
             return advancePlacement("success");
         }
 
-        lastVerifyOk = false;
+        JSONObject current = batch.optJSONObject("current");
+        if (current != null) {
+            getWritableDatabase().execSQL("UPDATE placement_items SET actual_drawer_number = 0, sensor_event_at = 0 WHERE id = ?",
+                    new Object[]{current.optInt("id")});
+        }
+        lastVerifyOk = true;
+        lastVerifyMessage = "";
         lastVerifyMessage = mismatchExpectedDrawer + "번 서랍에 다시 넣어주세요.";
         mismatchPending = false;
         mismatchExpectedDrawer = 0;
         mismatchActualDrawer = 0;
+        lastVerifyMessage = "";
         JSONObject retry = getActivePlacementBatch();
-        retry.put("last_result", "fail");
+        retry.put("last_result", "retry");
         return retry;
     }
 
