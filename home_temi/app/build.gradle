@@ -1,0 +1,53 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    compileSdkVersion 33
+    // buildToolsVersion "30.0.3"
+
+    defaultConfig {
+        applicationId "org.techtown.hello"
+        minSdkVersion 23
+        targetSdkVersion 33
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        // 실제 Temi 배포용 release 빌드를 debug 키스토어로 서명해 바로 설치 가능하게 함.
+        // (정식 배포 시에는 별도 release 키스토어로 교체 권장)
+        temi {
+            storeFile file("${System.properties['user.home']}/.android/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.temi
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.5.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'com.google.zxing:core:3.5.3'
+    implementation 'com.robotemi:sdk:1.131.4'
+    testImplementation 'junit:junit:4.+'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.2'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.3.0'
+}

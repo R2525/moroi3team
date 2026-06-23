@@ -1,0 +1,9 @@
+profiles:
+  default:
+    fqbn: arduino:zephyr:unoq
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - HX711 Arduino Library (0.7.5)
+
+default_profile: default
